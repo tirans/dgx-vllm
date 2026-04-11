@@ -29,3 +29,4 @@ ansible/.vault_pass
 
 # Superpowers brainstorming companion (local-only state)
 .superpowers/
+docs/superpowers/
