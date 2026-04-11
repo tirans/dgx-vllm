@@ -73,20 +73,29 @@
           content: "Reply with exactly: VALIDATION_OK"
       max_tokens: 20
       temperature: 0.0
+      # Qwen3 family reasoning escape hatch — keeps the model from
+      # burning the 20-token budget inside a <think> block and leaving
+      # message.content null. No-op for non-Qwen3 chat templates.
+      chat_template_kwargs:
+        enable_thinking: false
     return_content: true
     status_code: 200
     timeout: 300
   register: chat_response
   retries: 3
   delay: 30
-  until: chat_response.status == 200
+  until:
+    - chat_response.status == 200
+    - (chat_response.json.choices[0].message.content | default('', true)) | length > 0
   no_log: true
 
 - name: Display chat result
   ansible.builtin.debug:
     msg: >-
       PASS — Model {{ chat_response.json.model }} responded:
-      {{ chat_response.json.choices[0].message.content | truncate(200) }}
+      {{ (chat_response.json.choices[0].message.content
+          or (chat_response.json.choices[0].message.reasoning_content | default(''))
+          or '(empty)') | truncate(200) }}
 
 - name: "Test 4: Chat completion with scale-from-zero model (cold start)"
   when: validate_cold_start_models | bool
@@ -106,6 +115,8 @@
               content: "Reply with exactly: COLD_START_OK"
           max_tokens: 20
           temperature: 0.0
+          chat_template_kwargs:
+            enable_thinking: false
         return_content: true
         status_code: 200
         timeout: 300
@@ -116,7 +127,9 @@
       ansible.builtin.debug:
         msg: >-
           PASS — Cold-start model {{ cold_response.json.model }} responded:
-          {{ cold_response.json.choices[0].message.content | truncate(200) }}
+          {{ (cold_response.json.choices[0].message.content
+              or (cold_response.json.choices[0].message.reasoning_content | default(''))
+              or '(empty)') | truncate(200) }}
 
 - name: Validation summary
   ansible.builtin.debug:
