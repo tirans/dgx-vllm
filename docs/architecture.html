@@ -286,6 +286,29 @@
       overflow-x: auto;
       white-space: pre-wrap;
     }
+    .components {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 24px;
+      font-size: 13px;
+    }
+    .components th, .components td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-dim);
+      vertical-align: top;
+    }
+    .components th {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      border-bottom: 2px solid var(--border);
+      background: #000;
+    }
+    .components td code { color: var(--accent); }
+    .components tbody tr:hover { background: var(--surface-hi); }
   </style>
 </head>
 <body>
@@ -680,6 +703,107 @@
 # Must be 0.7 — see Section 2.</pre>
         </div>
       </div>
+    </section>
+
+    <section id="components">
+      <h2>Section 8 · Component reference</h2>
+      <p class="section-title">Every K8s object, what it is, where it lives</p>
+      <p>
+        A flat list of every Kubernetes resource the stack creates, plus the image it runs
+        and a one-line purpose. Use this as a quick lookup when you see something in
+        <code>kubectl get all -n llm-stack</code> and need to know what it does.
+      </p>
+
+      <table class="components">
+        <thead>
+          <tr>
+            <th>Kind</th>
+            <th>Name</th>
+            <th>Namespace</th>
+            <th>Image</th>
+            <th>Purpose</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Deployment</td>
+            <td><code>litellm-proxy</code></td>
+            <td><code>llm-stack</code></td>
+            <td><code>ghcr.io/berriai/litellm:main-stable</code></td>
+            <td>OpenAI-compatible front door. Aliases, auth, retries.</td>
+          </tr>
+          <tr>
+            <td>Service</td>
+            <td><code>litellm-proxy</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>LoadBalancer on :4000. The only port clients hit.</td>
+          </tr>
+          <tr>
+            <td>ConfigMap</td>
+            <td><code>litellm-config</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>Rendered <code>proxy_config.yaml</code> with model routes.</td>
+          </tr>
+          <tr>
+            <td>Secret</td>
+            <td><code>litellm-secret</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>LiteLLM master key (from Ansible Vault).</td>
+          </tr>
+          <tr>
+            <td>Deployment</td>
+            <td><code>kubeai</code></td>
+            <td><code>llm-stack</code></td>
+            <td><code>substratusai/kubeai:latest</code></td>
+            <td>KubeAI operator. Watches Model CRDs, reconciles vLLM pods, scales-from-zero.</td>
+          </tr>
+          <tr>
+            <td>Model (CRD)</td>
+            <td><code>qwen35-35b-a3b</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>Always-warm model definition (<code>min_replicas: 1</code>).</td>
+          </tr>
+          <tr>
+            <td>Model (CRD)</td>
+            <td><code>qwen3-30b-a3b</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>Scale-from-zero model definition (<code>min_replicas: 0</code>).</td>
+          </tr>
+          <tr>
+            <td>Pod</td>
+            <td><code>model-qwen35-…</code></td>
+            <td><code>llm-stack</code></td>
+            <td><code>scitrera/dgx-spark-vllm:0.17.0-t5</code></td>
+            <td>vLLM serving qwen35. Created by KubeAI.</td>
+          </tr>
+          <tr>
+            <td>Secret</td>
+            <td><code>kubeai-huggingface</code></td>
+            <td><code>llm-stack</code></td>
+            <td>—</td>
+            <td>Holds <code>HF_TOKEN</code>. Hardcoded name — required by KubeAI.</td>
+          </tr>
+          <tr>
+            <td>DaemonSet</td>
+            <td><code>nvidia-device-plugin</code></td>
+            <td><code>nvidia-device-plugin</code></td>
+            <td><code>nvcr.io/nvidia/k8s-device-plugin</code></td>
+            <td>Exposes <code>nvidia.com/gpu</code> resource on the node.</td>
+          </tr>
+          <tr>
+            <td>RuntimeClass</td>
+            <td><code>nvidia</code></td>
+            <td>(cluster)</td>
+            <td>—</td>
+            <td>Tells containerd to use the NVIDIA runtime for tagged pods.</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
 
     <!-- Sections will be added here in subsequent tasks -->
