@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -309,9 +309,20 @@
     }
     .components td code { color: var(--accent); }
     .components tbody tr:hover { background: var(--surface-hi); }
+
+    /* === REDUCED MOTION ============================================ */
+    @media (prefers-reduced-motion: reduce) {
+      * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+      .dot.hot { animation: none; }
+      .packet  { display: none !important; }
+    }
+
+    /* Hide play/pause controls when JS is disabled — they would do nothing */
+    .no-js .diagram .controls { display: none; }
   </style>
 </head>
 <body>
+<script>document.documentElement.classList.remove('no-js');</script>
   <div class="container">
     <header class="doc-header">
       <h1>DGX Spark LLM Stack</h1>
