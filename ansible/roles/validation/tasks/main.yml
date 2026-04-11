@@ -1,0 +1,132 @@
+---
+# roles/validation/tasks/main.yml — End-to-end stack health checks
+
+- name: Determine proxy URL if not already set
+  when: litellm_proxy_url is not defined
+  block:
+    - name: Get node IP for validation
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get nodes
+          -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: val_node_ip
+      changed_when: false
+
+    - name: Get NodePort for validation
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n {{ kubeai_namespace }} get svc litellm-proxy
+          -o jsonpath='{.spec.ports[0].nodePort}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: val_node_port
+      changed_when: false
+      failed_when: false
+
+    - name: Set fallback proxy URL
+      ansible.builtin.set_fact:
+        litellm_proxy_url: "http://{{ val_node_ip.stdout }}:{{ val_node_port.stdout }}"
+
+- name: "Test 1: LiteLLM health check"
+  ansible.builtin.uri:
+    url: "{{ litellm_proxy_url }}/health/readiness"
+    method: GET
+    return_content: false
+    status_code: 200
+    timeout: "{{ validation_timeout_secs }}"
+  register: health_check
+
+- name: Health check passed
+  ansible.builtin.debug:
+    msg: "PASS — LiteLLM is healthy (HTTP {{ health_check.status }})"
+
+- name: "Test 2: List available models"
+  ansible.builtin.uri:
+    url: "{{ litellm_proxy_url }}/v1/models"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ litellm_master_key }}"
+    return_content: true
+    status_code: 200
+    timeout: "{{ validation_timeout_secs }}"
+  register: models_response
+  no_log: true
+
+- name: Display available models
+  ansible.builtin.debug:
+    msg: "PASS — Models: {{ models_response.json.data | map(attribute='id') | list | join(', ') }}"
+
+- name: "Test 3: Chat completion with primary model (may wait for vLLM startup)"
+  ansible.builtin.uri:
+    url: "{{ litellm_proxy_url }}/v1/chat/completions"
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: "Bearer {{ litellm_master_key }}"
+    body_format: json
+    body:
+      model: "{{ (models | dict2items | selectattr('value.enabled', 'equalto', true) | selectattr('value.min_replicas', 'greaterthan', 0) | map(attribute='value') | first).litellm_aliases[0] }}"
+      messages:
+        - role: user
+          content: "Reply with exactly: VALIDATION_OK"
+      max_tokens: 20
+      temperature: 0.0
+    return_content: true
+    status_code: 200
+    timeout: 300
+  register: chat_response
+  retries: 3
+  delay: 30
+  until: chat_response.status == 200
+  no_log: true
+
+- name: Display chat result
+  ansible.builtin.debug:
+    msg: >-
+      PASS — Model {{ chat_response.json.model }} responded:
+      {{ chat_response.json.choices[0].message.content | truncate(200) }}
+
+- name: "Test 4: Chat completion with scale-from-zero model (cold start)"
+  when: validate_cold_start_models | bool
+  block:
+    - name: Send request to cold-start model
+      ansible.builtin.uri:
+        url: "{{ litellm_proxy_url }}/v1/chat/completions"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ litellm_master_key }}"
+        body_format: json
+        body:
+          model: "{{ (models | dict2items | selectattr('value.enabled', 'equalto', true) | selectattr('value.min_replicas', 'equalto', 0) | map(attribute='value') | first).litellm_aliases[0] }}"
+          messages:
+            - role: user
+              content: "Reply with exactly: COLD_START_OK"
+          max_tokens: 20
+          temperature: 0.0
+        return_content: true
+        status_code: 200
+        timeout: 300
+      register: cold_response
+      no_log: true
+
+    - name: Display cold-start result
+      ansible.builtin.debug:
+        msg: >-
+          PASS — Cold-start model {{ cold_response.json.model }} responded:
+          {{ cold_response.json.choices[0].message.content | truncate(200) }}
+
+- name: Validation summary
+  ansible.builtin.debug:
+    msg: |
+      ======================================
+      Stack validation PASSED
+      ======================================
+      Proxy URL: {{ litellm_proxy_url }}
+      API endpoint: {{ litellm_proxy_url }}/v1/chat/completions
+
+      From any LAN client:
+        export OPENAI_API_BASE={{ litellm_proxy_url }}/v1
+        export OPENAI_API_KEY=<your-litellm-key>

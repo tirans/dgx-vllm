@@ -1,0 +1,187 @@
+---
+# roles/kubeai/tasks/main.yml — KubeAI operator and model catalog
+
+- name: Create llm-stack namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ kubeai_namespace }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Apply default-deny ingress NetworkPolicies
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ role_path }}/files/network-policies.yaml"
+    namespace: "{{ kubeai_namespace }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Create HuggingFace secret (kubeai-huggingface)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: kubeai-huggingface
+        namespace: "{{ kubeai_namespace }}"
+      type: Opaque
+      stringData:
+        token: "{{ hf_token }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  no_log: true
+
+- name: Create model cache directory
+  ansible.builtin.file:
+    path: "{{ hf_cache_host_path }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Add KubeAI Helm repo
+  kubernetes.core.helm_repository:
+    name: kubeai
+    repo_url: https://www.kubeai.org
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Install KubeAI operator and model catalog
+  block:
+    - name: Template KubeAI operator values
+      ansible.builtin.template:
+        src: values-kubeai.yaml.j2
+        dest: /tmp/ansible-kubeai-values.yaml
+        mode: "0600"
+
+    - name: Install KubeAI operator
+      kubernetes.core.helm:
+        name: kubeai
+        chart_ref: kubeai/kubeai
+        release_namespace: "{{ kubeai_namespace }}"
+        create_namespace: true
+        values_files:
+          - /tmp/ansible-kubeai-values.yaml
+        wait: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    - name: Wait for KubeAI operator to be ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n {{ kubeai_namespace }} wait
+          --for=condition=Available deployment/kubeai
+          --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      retries: 3
+      delay: 30
+      register: kubeai_wait
+      until: kubeai_wait.rc == 0
+
+    - name: Template model catalog values
+      ansible.builtin.template:
+        src: values-models.yaml.j2
+        dest: /tmp/ansible-models-values.yaml
+        mode: "0600"
+
+    - name: Install model catalog
+      kubernetes.core.helm:
+        name: kubeai-models
+        chart_ref: kubeai/models
+        release_namespace: "{{ kubeai_namespace }}"
+        values_files:
+          - /tmp/ansible-models-values.yaml
+        wait: true
+        wait_timeout: 120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  always:
+    - name: Clean up temp values files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/ansible-kubeai-values.yaml
+        - /tmp/ansible-models-values.yaml
+
+- name: List deployed models
+  ansible.builtin.command:
+    cmd: kubectl -n {{ kubeai_namespace }} get models
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: models_list
+  changed_when: false
+
+- name: Display deployed models
+  ansible.builtin.debug:
+    msg: "{{ models_list.stdout }}"
+
+- name: Wait for model pods to start (warm models only)
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ kubeai_namespace }} get pods
+      -l app=model-{{ item.key }}
+      --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null | head -1
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: model_pod_status
+  changed_when: false
+  retries: 30
+  delay: 20
+  until: >-
+    model_pod_status.stdout == 'Running'
+    or model_pod_status.stdout == ''
+  loop: "{{ models | dict2items | selectattr('value.enabled', 'equalto', true) | selectattr('value.min_replicas', 'greaterthan', 0) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Check for CrashLoopBackOff pods
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ kubeai_namespace }} get pods
+      --no-headers 2>/dev/null |
+      grep -E 'CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull' || true
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: crashing_pods
+  changed_when: false
+
+- name: Get logs from crashing pods
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ kubeai_namespace }} logs {{ item.split()[0] }} --tail=10 2>&1
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: crash_logs
+  changed_when: false
+  loop: "{{ crashing_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  when: crashing_pods.stdout_lines | length > 0
+
+- name: Report crashing pods
+  ansible.builtin.fail:
+    msg: |
+      Pods in error state detected in {{ kubeai_namespace }} namespace:
+
+      {{ crashing_pods.stdout }}
+
+      {% if crash_logs.results is defined %}
+      {% for result in crash_logs.results %}
+      {% if result.stdout is defined %}
+      --- {{ result.item.split()[0] }} ---
+      {{ result.stdout }}
+
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      Fix the issue and re-run: ./setup.sh --tags kubeai,litellm,validate
+  when: crashing_pods.stdout_lines | length > 0

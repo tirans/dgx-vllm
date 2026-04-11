@@ -1,0 +1,150 @@
+---
+# clean.yml — Completely uninstall K3s and wipe ALL related state.
+#
+# Usage:
+#   ansible-playbook clean.yml                          # Single Spark, prompts for HF cache
+#   ansible-playbook clean.yml -e keep_hf_cache=true    # Preserve /data/hf-cache (70GB+ saved)
+#   ansible-playbook clean.yml -e force=true            # Skip confirmation prompt
+#   ansible-playbook clean.yml -i inventory/multi-spark.yml  # Wipe a fleet in parallel
+#
+# Run via the bash entry point: ./scripts/clean-k3s.sh [--keep-cache] [--yes]
+
+- name: Clean K3s installation
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    keep_hf_cache: false
+    force: false
+    hf_cache_path: /data/hf-cache
+
+  pre_tasks:
+    - name: Show what this playbook will do
+      ansible.builtin.debug:
+        msg:
+          - "==============================================="
+          - "K3s Complete Cleanup — host: {{ inventory_hostname }}"
+          - "==============================================="
+          - "Will remove:"
+          - "  - K3s service, binary, all data (/var/lib/rancher)"
+          - "  - All cached container images (vLLM, KubeAI, LiteLLM)"
+          - "  - Kubeconfig (/etc/rancher and ~/.kube)"
+          - "  - Generated containerd configs"
+          - "{{ 'KEEP /data/hf-cache (model downloads preserved)' if keep_hf_cache else 'WILL DELETE /data/hf-cache (model downloads, may be 70GB+)' }}"
+
+    - name: Confirm cleanup (skip with -e force=true)
+      ansible.builtin.pause:
+        prompt: "Type 'yes' to continue, anything else to abort"
+      register: confirm_reply
+      when: not (force | bool)
+
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Cleanup aborted by user."
+      when:
+        - not (force | bool)
+        - confirm_reply.user_input | default('') | lower != 'yes'
+
+  tasks:
+    - name: Stop K3s service if running
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+      failed_when: false
+
+    - name: Check if k3s-uninstall.sh exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: uninstall_script
+
+    - name: Run official k3s-uninstall.sh
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s-uninstall.sh
+      when: uninstall_script.stat.exists
+      register: uninstall_result
+      failed_when: false
+      changed_when: uninstall_result.rc == 0
+
+    - name: Remove leftover K3s paths
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/rancher/k3s
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /etc/rancher/k3s
+        - /etc/rancher
+        - /run/k3s
+        - /run/flannel
+        - /var/lib/cni
+        - /opt/cni
+        - /etc/cni
+        - /usr/local/bin/k3s
+        - /usr/local/bin/k3s-killall.sh
+        - /usr/local/bin/k3s-uninstall.sh
+        - /usr/local/bin/kubectl
+        - /usr/local/bin/crictl
+        - /usr/local/bin/ctr
+        - /etc/systemd/system/k3s.service
+        - /etc/systemd/system/k3s.service.env
+
+    - name: Resolve login user (works under become)
+      ansible.builtin.set_fact:
+        login_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+        login_home: "/home/{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+    - name: Remove user kubeconfig directory
+      ansible.builtin.file:
+        path: "{{ login_home }}/.kube"
+        state: absent
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Reset failed systemd units
+      ansible.builtin.command:
+        cmd: systemctl reset-failed
+      changed_when: false
+      failed_when: false
+
+    - name: Check HuggingFace model cache size
+      ansible.builtin.command:
+        cmd: "du -sh {{ hf_cache_path }}"
+      register: hf_size
+      failed_when: false
+      changed_when: false
+      when: not (keep_hf_cache | bool)
+
+    - name: Remove HuggingFace model cache
+      ansible.builtin.file:
+        path: "{{ hf_cache_path }}"
+        state: absent
+      when: not (keep_hf_cache | bool)
+
+    - name: Display HuggingFace cache action
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'KEPT /data/hf-cache (--keep-cache)' if (keep_hf_cache | bool)
+             else 'REMOVED /data/hf-cache (' + (hf_size.stdout | default('unknown')) + ')' }}
+
+  post_tasks:
+    - name: Verify cleanup
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: leftover_check
+      loop:
+        - /var/lib/rancher
+        - /etc/rancher
+        - /usr/local/bin/k3s
+        - /etc/systemd/system/k3s.service
+
+    - name: Assert no leftovers remain
+      ansible.builtin.assert:
+        that:
+          - not (leftover_check.results | selectattr('stat.exists', 'equalto', true) | list | length > 0)
+        fail_msg: >-
+          Some leftovers remain:
+          {{ leftover_check.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item') | list }}
+        success_msg: "Cleanup complete. System is back to pre-install state. Next: ./setup.sh"

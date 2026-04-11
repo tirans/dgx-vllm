@@ -1,0 +1,144 @@
+# ============================================================================
+# DGX Spark LLM Stack — Configuration
+# ============================================================================
+# Secrets (hf_token, litellm_master_key) are in vault.yml
+# Per-host overrides go in host_vars/<hostname>/vars.yml
+
+# --- Cluster ---
+kubeai_namespace: llm-stack
+# KubeAI operator image — Docker Hub has working arm64 manifests
+# (GHCR ghcr.io/kubeai-project/kubeai has broken multi-arch for arm64)
+kubeai_image_repository: substratusai/kubeai
+kubeai_image_tag: latest
+k3s_disable_components:
+  - traefik
+  # We use the kubernetes.core.helm Ansible module + Helm v3 binary directly,
+  # not K3s's embedded HelmChart CRD reconciler. Disabling saves a controller.
+  - helm-controller
+k3s_kubeconfig_mode: "600"
+k3s_max_pods: 64
+# Set to true to wipe K3s and reinstall on the next setup.sh run.
+# Required when changing flags that the K3s installer reads at install time
+# (e.g. secrets-encryption, audit log paths). Uses scripts/clean-k3s.sh
+# with --keep-cache to preserve /data/hf-cache.
+k3s_force_reinstall: false
+# Kubelet args (defaults are fine, only override max-pods + eviction)
+k3s_kubelet_args:
+  - "max-pods=64"
+  # Eviction threshold tuned for the GB10 unified memory.
+  # Default 100Mi is too low when vLLM grabs 65GB+ for model weights.
+  - "eviction-hard=memory.available<500Mi,nodefs.available<10%"
+# kube-controller-manager args. Default terminated-pod-gc-threshold is
+# 12500 — way too high for a single-node cluster. Set to 10 so the GC
+# cleans up zombie/Failed/Unknown pods almost immediately after reboots.
+k3s_controller_manager_args:
+  - "terminated-pod-gc-threshold=10"
+# kube-apiserver args — audit logging (CIS recommendation)
+k3s_apiserver_args:
+  - "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log"
+  - "audit-policy-file=/var/lib/rancher/k3s/server/audit.yaml"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+
+# --- GPU / Hardware ---
+gpu_memory_utilization: "0.7"
+enforce_eager: true
+min_disk_gb: 50
+min_driver_version: 580
+hf_cache_host_path: /data/hf-cache
+shared_memory_size: "16Gi"
+
+# --- vLLM ---
+# scitrera/dgx-spark-vllm:0.17.0-t5 — released 2026-03-08
+# - vLLM 0.17.0 + Transformers 5.x (newer than 0.14.1-t5)
+# - Expected to support Qwen 3.5 (qwen3_5_moe architecture)
+# - Likely does NOT yet support Gemma 4 (Transformers PR landed 2026-04-01)
+# Tag history (Docker Hub scitrera/dgx-spark-vllm):
+#   0.17.0-t5  (2026-03-08) — current
+#   0.16.0-t5  (2026-03-04)
+#   0.15.1-t5  (2026-02-04)
+#   0.14.1-t5  (2026-01-26) — previous, Qwen3 only, no Qwen 3.5
+vllm_image: "scitrera/dgx-spark-vllm:0.17.0-t5"
+vllm_default_args:
+  - "--host=0.0.0.0"
+  - "--port=8000"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
+  - "--enforce-eager"
+  # vLLM 0.17 renamed --disable-log-requests to --no-enable-log-requests
+  - "--no-enable-log-requests"
+  # Use FP8 KV cache to fit max context windows on the GB10's unified memory.
+  # Without this, 256K context per request requires more KV cache than fits.
+  - "--kv-cache-dtype=fp8"
+
+# --- Models ---
+models:
+  # Gemma 4 disabled — requires Transformers >= 4.51 (added 2026-04-01).
+  # No pre-built vLLM image supports it yet. Re-enable when a compatible
+  # image is available.
+  # All models use their native max context window (see CLAUDE.md for rationale).
+  # FP8 KV cache (set in vllm_default_args) makes this fit on the GB10.
+  gemma4-26b-a4b:
+    enabled: false
+    owner: google
+    url: "hf://google/gemma-4-26B-A4B-it"
+    features:
+      - TextGeneration
+    min_replicas: 0
+    max_replicas: 1
+    extra_args:
+      - "--max-model-len=131072"   # Gemma 4 native max: 128K
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=hermes"
+    litellm_aliases:
+      - gemma4
+
+  # Qwen 3.5 35B-A3B — primary, runs on 0.17.0-t5 with Transformers 5.x
+  qwen35-35b-a3b:
+    enabled: true
+    owner: qwen
+    url: "hf://Qwen/Qwen3.5-35B-A3B"
+    features:
+      - TextGeneration
+    min_replicas: 1
+    max_replicas: 1
+    extra_args:
+      - "--max-model-len=262144"   # Qwen 3.5 native max: 256K
+      - "--enable-auto-tool-choice"
+      # qwen3_coder is the right parser for Qwen3.5 instruct (not hermes);
+      # qwen3 reasoning parser keeps <think> blocks out of message.content
+      # so tool_calls populate correctly. vLLM issue #39056 affects >=0.19.
+      - "--tool-call-parser=qwen3_coder"
+      - "--reasoning-parser=qwen3"
+    litellm_aliases:
+      - qwen35
+      - gpt-4
+
+  # Qwen 3 30B-A3B — proven fallback, scale from zero
+  qwen3-30b-a3b:
+    enabled: true
+    owner: qwen
+    url: "hf://Qwen/Qwen3-30B-A3B-Instruct-2507"
+    features:
+      - TextGeneration
+    min_replicas: 0
+    max_replicas: 1
+    extra_args:
+      - "--max-model-len=262144"   # Qwen 3 native max: 256K
+    litellm_aliases:
+      - qwen3
+
+# --- LiteLLM ---
+litellm_image: "ghcr.io/berriai/litellm:main-stable"
+litellm_port: 4000
+litellm_num_workers: 2
+litellm_service_type: LoadBalancer
+litellm_router_strategy: "simple-shuffle"
+litellm_timeout: 300
+litellm_num_retries: 2
+litellm_drop_params: true
+
+# --- Validation ---
+validate_cold_start_models: false
+validation_timeout_secs: 30

@@ -1,0 +1,32 @@
+# models/gemma4-26b-a4b.yaml — KubeAI Model CRD
+# Gemma 4 26B-A4B MoE: 3.8B active params, ~52 tok/s on DGX Spark
+apiVersion: kubeai.org/v1
+kind: Model
+metadata:
+  name: gemma4-26b-a4b
+  namespace: llm-stack
+  labels:
+    app.kubernetes.io/part-of: dgx-spark-llm-stack
+    model-family: gemma4
+    priority: primary
+spec:
+  features: [TextGeneration]
+  owner: google
+  url: "hf://google/gemma-4-26B-A4B-it"
+  engine: VLLM
+  args:
+    - "--max-model-len=65536"
+    - "--gpu-memory-utilization=0.7"
+    - "--trust-remote-code"
+    - "--enforce-eager"
+    - "--enable-auto-tool-choice"
+    - "--tool-call-parser=hermes"
+    - "--disable-log-requests"
+  env:
+    HF_TOKEN:
+      secretKeyRef:
+        name: hf-secret
+        key: token
+  resourceProfile: dgx-spark-gpu
+  minReplicas: 1
+  maxReplicas: 1

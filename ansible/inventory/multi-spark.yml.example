@@ -1,0 +1,12 @@
+# Multi-Spark inventory — copy to multi-spark.yml and edit
+# Usage: ./setup.sh -i inventory/multi-spark.yml
+all:
+  hosts:
+    spark-01:
+      ansible_host: 192.168.1.101
+    spark-02:
+      ansible_host: 192.168.1.102
+  vars:
+    ansible_user: dgxuser
+    ansible_become: true
+    ansible_python_interpreter: /usr/bin/python3

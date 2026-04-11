@@ -1,0 +1,63 @@
+# litellm/proxy_config.yaml — LiteLLM proxy configuration
+#
+# Routes requests to KubeAI backend which manages vLLM pods.
+# Provides model aliasing, fallbacks, and a unified API.
+
+model_list:
+  #---------------------------------------------------------------------------
+  # Gemma 4 26B-A4B — primary fast model
+  # Aliased as "gemma4" and also responds to "gpt-4" for compatibility
+  #---------------------------------------------------------------------------
+  - model_name: gemma4
+    litellm_params:
+      model: openai/gemma4-26b-a4b
+      api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+      api_key: "ignored"              # KubeAI doesn't require auth internally
+
+  - model_name: gpt-4                 # alias for tools that hardcode "gpt-4"
+    litellm_params:
+      model: openai/gemma4-26b-a4b
+      api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+      api_key: "ignored"
+
+  #---------------------------------------------------------------------------
+  # Qwen 3.5 35B-A3B — secondary heavy reasoning model
+  # KubeAI will scale this from 0→1 on first request (~60-90s cold start)
+  #---------------------------------------------------------------------------
+  - model_name: qwen35
+    litellm_params:
+      model: openai/qwen35-35b-a3b
+      api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+      api_key: "ignored"
+      timeout: 300                    # allow for cold-start scale-from-zero
+
+  #---------------------------------------------------------------------------
+  # Anthropic Claude (optional cloud fallback)
+  # Uncomment if you want cloud fallback when local models are overloaded
+  #---------------------------------------------------------------------------
+  # - model_name: claude-fallback
+  #   litellm_params:
+  #     model: anthropic/claude-sonnet-4-20250514
+  #     api_key: "os.environ/ANTHROPIC_API_KEY"
+
+# Router settings
+router_settings:
+  routing_strategy: "simple-shuffle"  # or "latency-based-routing"
+  num_retries: 2
+  timeout: 300                        # seconds, generous for cold starts
+  retry_after: 5
+
+# Fallback chain: if gemma4 fails, try qwen35
+# Uncomment to enable automatic fallback
+# router_settings:
+#   fallbacks:
+#     - gemma4: [qwen35]
+
+# General settings
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"  # set in secret
+
+litellm_settings:
+  drop_params: true                   # silently drop unsupported params
+  set_verbose: false
+  request_timeout: 300

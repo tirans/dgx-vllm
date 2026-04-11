@@ -1,0 +1,137 @@
+# Managed by Ansible — do not edit manually
+# Source: ansible/roles/litellm/templates/deployment.yaml.j2
+#
+# Single source of truth: model routes, secrets, and tunables come from
+# ansible/group_vars/all/vars.yml and vault.yml
+{% set proxy_config %}
+model_list:
+{% for model_name, model in models.items() %}
+{% if model.enabled | default(false) %}
+{% for alias in model.litellm_aliases | default([model_name]) %}
+  - model_name: {{ alias }}
+    litellm_params:
+      model: openai/{{ model_name }}
+      api_base: http://kubeai.{{ kubeai_namespace }}.svc.cluster.local/openai/v1
+      api_key: "ignored"
+{% if model.min_replicas | default(0) == 0 %}
+      timeout: {{ litellm_timeout }}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+router_settings:
+  routing_strategy: "{{ litellm_router_strategy }}"
+  num_retries: {{ litellm_num_retries }}
+  timeout: {{ litellm_timeout }}
+  retry_after: 5
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+
+litellm_settings:
+  drop_params: {{ litellm_drop_params | lower }}
+  set_verbose: false
+  request_timeout: {{ litellm_timeout }}
+{% endset %}
+{% set config_material = proxy_config ~ "\n" ~ litellm_master_key %}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ kubeai_namespace }}
+data:
+  proxy_config.yaml: |
+{{ proxy_config | indent(4, True) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secret
+  namespace: {{ kubeai_namespace }}
+type: Opaque
+stringData:
+  master-key: "{{ litellm_master_key }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: {{ kubeai_namespace }}
+  labels:
+    app: litellm-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-proxy
+  template:
+    metadata:
+      labels:
+        app: litellm-proxy
+      annotations:
+        dgx-spark/config-hash: "{{ config_material | hash('sha256') }}"
+    spec:
+      containers:
+        - name: litellm
+          image: {{ litellm_image }}
+          args:
+            - "--config"
+            - "/etc/litellm/proxy_config.yaml"
+            - "--port"
+            - "{{ litellm_port }}"
+            - "--num_workers"
+            - "{{ litellm_num_workers }}"
+          ports:
+            - containerPort: {{ litellm_port }}
+              name: http
+              protocol: TCP
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master-key
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: {{ litellm_port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: {{ litellm_port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-proxy
+  namespace: {{ kubeai_namespace }}
+spec:
+  type: {{ litellm_service_type }}
+  selector:
+    app: litellm-proxy
+  ports:
+    - port: {{ litellm_port }}
+      targetPort: {{ litellm_port }}
+      protocol: TCP
+      name: http

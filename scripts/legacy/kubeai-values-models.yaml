@@ -1,0 +1,67 @@
+# kubeai/values-models.yaml — Model catalog for DGX Spark
+#
+# These models are tuned for the GB10's 128GB unified memory
+# and 273 GB/s bandwidth. MoE models strongly preferred.
+
+catalog:
+  #---------------------------------------------------------------------------
+  # PRIMARY: Gemma 4 26B-A4B (MoE) — fast daily driver
+  #---------------------------------------------------------------------------
+  gemma4-26b-a4b:
+    enabled: true
+    features: [TextGeneration]
+    owner: google
+    url: "hf://google/gemma-4-26B-A4B-it"
+    engine: VLLM
+    args:
+      - "--max-model-len=65536"
+      - "--gpu-memory-utilization=0.7"
+      - "--trust-remote-code"
+      - "--enforce-eager"
+      # Enable tool/function calling
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=hermes"
+    env:
+      HF_TOKEN:
+        secretKeyRef:
+          name: hf-secret
+          key: token
+    resourceProfile: dgx-spark-gpu
+    minReplicas: 1    # always warm — this is the daily driver
+    maxReplicas: 1
+
+  #---------------------------------------------------------------------------
+  # SECONDARY: Qwen 3.5 35B-A3B (MoE) — heavy reasoning
+  #---------------------------------------------------------------------------
+  qwen35-35b-a3b:
+    enabled: true
+    features: [TextGeneration]
+    owner: qwen
+    url: "hf://Qwen/Qwen3.5-35B-A3B"
+    engine: VLLM
+    args:
+      - "--max-model-len=32768"
+      - "--gpu-memory-utilization=0.7"
+      - "--trust-remote-code"
+      - "--enforce-eager"
+    env:
+      HF_TOKEN:
+        secretKeyRef:
+          name: hf-secret
+          key: token
+    resourceProfile: dgx-spark-gpu
+    minReplicas: 0    # scale from zero on demand
+    maxReplicas: 1
+
+  #---------------------------------------------------------------------------
+  # OPTIONAL: Embeddings model for RAG pipelines
+  #---------------------------------------------------------------------------
+  # nomic-embed:
+  #   enabled: false
+  #   features: [TextEmbedding]
+  #   owner: nomic
+  #   url: "ollama://nomic-embed-text"
+  #   engine: OLlama
+  #   resourceProfile: cpu-only
+  #   minReplicas: 0
+  #   maxReplicas: 1

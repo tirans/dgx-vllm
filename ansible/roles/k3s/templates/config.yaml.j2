@@ -1,0 +1,22 @@
+# Managed by Ansible — do not edit manually
+# Source: ansible/roles/k3s/templates/config.yaml.j2
+# K3s reads this on startup. CLI flags in INSTALL_K3S_EXEC override these.
+write-kubeconfig-mode: "{{ k3s_kubeconfig_mode }}"
+disable:
+{% for c in k3s_disable_components %}
+  - {{ c }}
+{% endfor %}
+secrets-encryption: true
+protect-kernel-defaults: true
+kubelet-arg:
+{% for a in k3s_kubelet_args %}
+  - "{{ a }}"
+{% endfor %}
+kube-controller-manager-arg:
+{% for a in k3s_controller_manager_args %}
+  - "{{ a }}"
+{% endfor %}
+kube-apiserver-arg:
+{% for a in k3s_apiserver_args %}
+  - "{{ a }}"
+{% endfor %}

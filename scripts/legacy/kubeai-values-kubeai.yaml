@@ -1,0 +1,64 @@
+# kubeai/values-kubeai.yaml — KubeAI operator config for DGX Spark
+#
+# DGX Spark has 1x GB10 GPU with 128GB unified memory.
+# We define a custom resource profile matching this hardware.
+
+resourceProfiles:
+  # DGX Spark GB10 — single GPU, shared unified memory
+  dgx-spark-gpu:
+    requests:
+      nvidia.com/gpu: "1"
+    limits:
+      nvidia.com/gpu: "1"
+    nodeSelector: {}
+    # Uncomment if you label your node:
+    # nodeSelector:
+    #   nvidia.com/gpu.product: "NVIDIA-GB10"
+
+  # CPU-only profile for lightweight models (embeddings, small inference)
+  cpu-only:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+
+# KubeAI operator settings
+modelServers:
+  VLLM:
+    # Use NGC vLLM container optimized for GB10 (SM_121)
+    # Update tag as new versions ship
+    images:
+      server: "vllm/vllm-openai:gemma4-cu130"
+    defaultArgs:
+      - "--host=0.0.0.0"
+      - "--port=8000"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization=0.7"    # critical for unified memory
+      - "--disable-log-requests"
+    defaultEnv:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: hf-secret
+            key: token
+    # Mount shared memory for NCCL + local model cache
+    defaultVolumeMounts:
+      - name: dshm
+        mountPath: /dev/shm
+      - name: hf-cache
+        mountPath: /root/.cache/huggingface
+    defaultVolumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "16Gi"
+      - name: hf-cache
+        hostPath:
+          path: /data/hf-cache
+          type: DirectoryOrCreate
+
+  OLlama:
+    images:
+      server: "ollama/ollama:latest"

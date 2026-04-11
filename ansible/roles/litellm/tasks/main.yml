@@ -1,0 +1,87 @@
+---
+# roles/litellm/tasks/main.yml — Deploy LiteLLM proxy
+
+- name: Deploy LiteLLM manifest
+  block:
+    - name: Template LiteLLM manifest
+      ansible.builtin.template:
+        src: deployment.yaml.j2
+        dest: /tmp/ansible-litellm-deployment.yaml
+        mode: "0600"
+      no_log: true
+
+    - name: Apply LiteLLM manifest
+      kubernetes.core.k8s:
+        state: present
+        src: /tmp/ansible-litellm-deployment.yaml
+        namespace: "{{ kubeai_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  always:
+    - name: Clean up temp manifest
+      ansible.builtin.file:
+        path: /tmp/ansible-litellm-deployment.yaml
+        state: absent
+
+- name: Wait for LiteLLM rollout (handles slow image pulls)
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n {{ kubeai_namespace }} rollout status
+      deployment/litellm-proxy --timeout=300s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  changed_when: false
+  retries: 4
+  delay: 30
+  register: litellm_rollout
+  until: litellm_rollout.rc == 0
+
+- name: Determine proxy URL
+  block:
+    - name: Get LoadBalancer IP
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n {{ kubeai_namespace }} get svc litellm-proxy
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: lb_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Get NodePort
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n {{ kubeai_namespace }} get svc litellm-proxy
+          -o jsonpath='{.spec.ports[0].nodePort}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: node_port
+      changed_when: false
+      failed_when: false
+
+    - name: Get node IP
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get nodes
+          -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: node_ip
+      changed_when: false
+
+    - name: Set proxy URL fact
+      ansible.builtin.set_fact:
+        litellm_proxy_url: >-
+          {{ 'http://' + lb_ip.stdout + ':' + (litellm_port | string)
+             if lb_ip.stdout | length > 0
+             else 'http://' + node_ip.stdout + ':' + (node_port.stdout | string)
+             if node_port.stdout | length > 0
+             else 'http://localhost:' + (litellm_port | string) }}
+
+- name: Display LiteLLM proxy URL
+  ansible.builtin.debug:
+    msg: |
+      LiteLLM Proxy URL: {{ litellm_proxy_url }}
+      API models endpoint: {{ litellm_proxy_url }}/v1/models

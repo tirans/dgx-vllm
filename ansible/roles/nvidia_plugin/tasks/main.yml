@@ -1,0 +1,51 @@
+---
+# roles/nvidia_plugin/tasks/main.yml — NVIDIA device plugin via Helm
+
+- name: Add NVIDIA device plugin Helm repo
+  kubernetes.core.helm_repository:
+    name: nvdp
+    repo_url: https://nvidia.github.io/k8s-device-plugin
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Install NVIDIA device plugin
+  kubernetes.core.helm:
+    name: nvidia-device-plugin
+    chart_ref: nvdp/nvidia-device-plugin
+    release_namespace: nvidia-device-plugin
+    create_namespace: true
+    values:
+      runtimeClassName: nvidia
+      gfd:
+        enabled: true
+    wait: true
+    wait_timeout: 120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Wait for device plugin pods to be ready
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n nvidia-device-plugin wait
+      --for=condition=Ready pod
+      -l app.kubernetes.io/name=nvidia-device-plugin
+      --timeout=120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  changed_when: false
+
+- name: Verify GPU visibility in node allocatable
+  ansible.builtin.command:
+    cmd: >-
+      kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: gpu_allocatable
+  changed_when: false
+  retries: 12
+  delay: 10
+  until: gpu_allocatable.stdout | default('0') | int > 0
+
+- name: Display GPU count
+  ansible.builtin.debug:
+    msg: "GPUs allocatable: {{ gpu_allocatable.stdout }}"

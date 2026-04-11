@@ -1,0 +1,31 @@
+# Secrets — never commit
+*.secret
+*.key
+.env
+.env.*
+
+# K3s kubeconfig
+k3s.yaml
+
+# HF cache
+hf-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Ansible vault password — never commit
+ansible/.vault_pass
+
+# Ansible retry files
+*.retry
+
+# Temporary rendered templates
+/tmp/ansible-*
+
+# Superpowers brainstorming companion (local-only state)
+.superpowers/

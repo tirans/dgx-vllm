@@ -1,0 +1,17 @@
+---
+# roles/k3s/handlers/main.yml
+
+- name: Restart K3s
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+    daemon_reload: true
+  register: k3s_restart
+
+- name: Wait for K3s node ready after restart
+  ansible.builtin.command:
+    cmd: kubectl wait --for=condition=Ready node --all --timeout=120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+  listen: "Restart K3s"

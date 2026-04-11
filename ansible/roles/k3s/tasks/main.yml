@@ -1,0 +1,160 @@
+---
+# roles/k3s/tasks/main.yml — Install K3s with NVIDIA containerd runtime
+
+- name: Force reinstall (clean wipe + reinstall)
+  when: k3s_force_reinstall | bool
+  ansible.builtin.command:
+    cmd: ./scripts/clean-k3s.sh --yes --keep-cache
+    chdir: "{{ playbook_dir }}/.."
+  changed_when: true
+
+- name: Install kernel sysctls (required by protect-kernel-defaults)
+  ansible.builtin.copy:
+    src: sysctl-kubelet.conf
+    dest: /etc/sysctl.d/90-kubelet.conf
+    mode: "0644"
+  register: sysctl_kubelet
+
+- name: Apply kernel sysctls
+  ansible.builtin.command:
+    cmd: sysctl --system
+  when: sysctl_kubelet.changed
+  changed_when: true
+
+- name: Ensure /etc/rancher/k3s exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Create K3s server directory
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/server
+    state: directory
+    mode: "0755"
+
+- name: Create K3s audit log directory (mode 0700)
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/server/logs
+    state: directory
+    mode: "0700"
+
+- name: Copy K3s audit policy
+  ansible.builtin.copy:
+    src: audit-policy.yaml
+    dest: /var/lib/rancher/k3s/server/audit.yaml
+    mode: "0600"
+
+- name: Template K3s config.yaml
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    # 0644 — kubectl reads this file when running as non-root.
+    # Contains no secrets (just flag values), so world-readable is fine.
+    mode: "0644"
+  notify: Restart K3s
+
+- name: Check if K3s is already installed
+  ansible.builtin.command:
+    cmd: systemctl is-active k3s
+  register: k3s_status
+  changed_when: false
+  failed_when: false
+
+- name: Install K3s
+  when: k3s_status.rc != 0
+  block:
+    - name: Download K3s install script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/install-k3s.sh
+        mode: "0755"
+
+    - name: Run K3s installer (config from /etc/rancher/k3s/config.yaml)
+      ansible.builtin.command:
+        cmd: /tmp/install-k3s.sh
+      environment:
+        INSTALL_K3S_EXEC: "server"
+      register: k3s_install
+      changed_when: k3s_install.rc == 0
+
+    - name: Clean up K3s install script
+      ansible.builtin.file:
+        path: /tmp/install-k3s.sh
+        state: absent
+
+    - name: Wait for K3s node to be ready
+      ansible.builtin.command:
+        cmd: kubectl wait --for=condition=Ready node --all --timeout=120s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+- name: Create kubectl symlink
+  ansible.builtin.file:
+    src: /usr/local/bin/k3s
+    dest: /usr/local/bin/kubectl
+    state: link
+    force: false
+  failed_when: false
+
+- name: Get login user info
+  ansible.builtin.set_fact:
+    login_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+    login_home: "/home/{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+- name: Set up kubeconfig for {{ login_user }}
+  block:
+    - name: Create .kube directory
+      ansible.builtin.file:
+        path: "{{ login_home }}/.kube"
+        state: directory
+        owner: "{{ login_user }}"
+        group: "{{ login_user }}"
+        mode: "0700"
+
+    - name: Copy kubeconfig to user home
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ login_home }}/.kube/config"
+        remote_src: true
+        owner: "{{ login_user }}"
+        group: "{{ login_user }}"
+        mode: "0600"
+
+# k3s' kubectl shim injects KUBECONFIG=/etc/rancher/k3s/k3s.yaml (root:0600)
+# when the env var is unset, bypassing ~/.kube/config. Writing KUBECONFIG to
+# /etc/environment makes pam_env set it for every session type — including
+# non-interactive ssh, where .bashrc/.profile would not be sourced.
+- name: Export KUBECONFIG system-wide via pam_env (k3s kubectl shim workaround)
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^KUBECONFIG='
+    line: "KUBECONFIG={{ login_home }}/.kube/config"
+    state: present
+    mode: "0644"
+
+# Grants read on /var/log/journal/*, so `journalctl -u k3s` works without
+# sudo for the login user. Group change requires a fresh login to take effect.
+- name: Add login user to systemd-journal group (journalctl without sudo)
+  ansible.builtin.user:
+    name: "{{ login_user }}"
+    groups: systemd-journal
+    append: true
+
+- name: Ensure containerd config directory exists
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Configure NVIDIA containerd runtime
+  ansible.builtin.template:
+    src: containerd-config.toml.tmpl.j2
+    dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    mode: "0644"
+  notify: Restart K3s
+
+- name: Set KUBECONFIG fact for subsequent roles
+  ansible.builtin.set_fact:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml

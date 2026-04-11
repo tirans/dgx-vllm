@@ -1,0 +1,7 @@
+# Managed by Ansible — do not edit manually
+# Minimal CIS-recommended audit policy for K3s.
+# Logs request metadata for every API operation.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: Metadata

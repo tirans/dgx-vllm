@@ -1,0 +1,58 @@
+# Managed by Ansible — do not edit manually
+# Source: ansible/roles/kubeai/templates/values-kubeai.yaml.j2
+
+# KubeAI operator image — use Docker Hub for arm64 support
+# (GHCR ghcr.io/kubeai-project/kubeai has broken multi-arch manifests)
+image:
+  repository: "{{ kubeai_image_repository }}"
+  tag: "{{ kubeai_image_tag }}"
+
+resourceProfiles:
+  dgx-spark-gpu:
+    imageName: dgx-spark
+    requests:
+      nvidia.com/gpu: "1"
+    limits:
+      nvidia.com/gpu: "1"
+    nodeSelector: {}
+
+  cpu-only:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+
+# Inject runtimeClassName: nvidia into model pods so the NVIDIA container
+# runtime is used (required for GPU access on K3s with RuntimeClass)
+modelServerPods:
+  jsonPatches:
+    - op: add
+      path: /spec/runtimeClassName
+      value: nvidia
+
+modelServers:
+  VLLM:
+    images:
+      dgx-spark: "{{ vllm_image }}"
+    defaultArgs:
+{% for arg in vllm_default_args %}
+      - "{{ arg }}"
+{% endfor %}
+    # HF_TOKEN is injected automatically by KubeAI from the
+    # 'kubeai-huggingface' secret (hardcoded in the operator)
+    defaultVolumeMounts:
+      - name: dshm
+        mountPath: /dev/shm
+      - name: hf-cache
+        mountPath: /root/.cache/huggingface
+    defaultVolumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "{{ shared_memory_size }}"
+      - name: hf-cache
+        hostPath:
+          path: "{{ hf_cache_host_path }}"
+          type: DirectoryOrCreate

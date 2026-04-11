@@ -1,0 +1,30 @@
+# models/qwen35-35b-a3b.yaml — KubeAI Model CRD
+# Qwen 3.5 35B-A3B MoE: 3B active params, ~47 tok/s FP8 on DGX Spark
+apiVersion: kubeai.org/v1
+kind: Model
+metadata:
+  name: qwen35-35b-a3b
+  namespace: llm-stack
+  labels:
+    app.kubernetes.io/part-of: dgx-spark-llm-stack
+    model-family: qwen35
+    priority: secondary
+spec:
+  features: [TextGeneration]
+  owner: qwen
+  url: "hf://Qwen/Qwen3.5-35B-A3B"
+  engine: VLLM
+  args:
+    - "--max-model-len=32768"
+    - "--gpu-memory-utilization=0.7"
+    - "--trust-remote-code"
+    - "--enforce-eager"
+    - "--disable-log-requests"
+  env:
+    HF_TOKEN:
+      secretKeyRef:
+        name: hf-secret
+        key: token
+  resourceProfile: dgx-spark-gpu
+  minReplicas: 0      # scale from zero — KubeAI spins up on first request
+  maxReplicas: 1

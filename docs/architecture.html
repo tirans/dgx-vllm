@@ -1,0 +1,1272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DGX Spark LLM Stack — Architecture</title>
+  <style>
+    /* === DESIGN TOKENS ============================================ */
+    :root {
+      --bg:          #000000;
+      --surface:     #0a0a0a;
+      --surface-hi:  #111111;
+      --border:      #76b900;  /* NVIDIA green */
+      --border-dim:  #1f3a00;
+      --accent:      #76b900;
+      --accent-hot:  #a4ff2a;
+      --text:        #ffffff;
+      --text-dim:    #9ca3af;
+      --mono:        'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      --sans:        -apple-system, 'Inter', system-ui, Segoe UI, Roboto, sans-serif;
+
+      --bevel: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+    }
+
+    /* === BASELINE ================================================= */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, kbd, samp { font-family: var(--mono); font-size: 0.9em; }
+    a { color: var(--accent); }
+
+    /* === CONTAINER ================================================ */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 48px 32px 96px;
+    }
+    .doc-header { margin-bottom: 64px; }
+    .doc-header h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      margin: 0 0 12px;
+    }
+    .doc-header .subtitle {
+      color: var(--text-dim);
+      font-size: 16px;
+      max-width: 720px;
+    }
+    section {
+      margin-bottom: 96px;
+    }
+    section > h2 {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-dim);
+    }
+    section > .section-title {
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0 0 24px;
+    }
+    section > p {
+      color: var(--text);
+      max-width: 760px;
+    }
+
+    /* === PRIMITIVES =============================================== */
+
+    /* Panel — beveled box with NVIDIA green border. The basic shape. */
+    .panel {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      clip-path: var(--bevel);
+      padding: 20px;
+      position: relative;
+    }
+    .panel.is-dim    { border-color: var(--border-dim); opacity: 0.55; }
+    .panel.is-active { border-color: var(--accent-hot); box-shadow: 0 0 0 1px var(--accent-hot) inset; }
+
+    /* Tile — a panel with a title strip on top. Used for components in diagrams. */
+    .tile {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      clip-path: var(--bevel);
+      display: flex;
+      flex-direction: column;
+      min-width: 160px;
+    }
+    .tile .tile-head {
+      background: var(--accent);
+      color: #000;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+    }
+    .tile .tile-body {
+      padding: 10px 12px;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .tile .tile-meta {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+    .tile.is-dim    { border-color: var(--border-dim); opacity: 0.55; }
+    .tile.is-dim .tile-head { background: var(--border-dim); color: var(--text-dim); }
+    .tile.is-active { border-color: var(--accent-hot); box-shadow: 0 0 12px rgba(164,255,42,0.35); }
+
+    /* NVIDIA badge tag — used for layer labels, version pills, namespace tags */
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: #000;
+      font-weight: 800;
+      font-size: 9px;
+      padding: 2px 8px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .badge.is-dim { background: var(--border-dim); color: var(--text-dim); }
+
+    /* Status dot */
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      vertical-align: middle;
+    }
+    .dot.cold {
+      background: transparent;
+      border: 1px dashed var(--border-dim);
+      box-shadow: none;
+    }
+    .dot.hot {
+      background: var(--accent-hot);
+      box-shadow: 0 0 10px var(--accent-hot);
+      animation: pulse-hot 0.9s ease-in-out infinite;
+    }
+    @keyframes pulse-hot {
+      0%, 100% { transform: scale(1);   opacity: 1; }
+      50%      { transform: scale(1.4); opacity: 0.6; }
+    }
+
+    /* Log area inside a tile — fixed-width monospace stream */
+    .log {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--accent);
+      background: #000;
+      padding: 8px 10px;
+      border-top: 1px solid var(--border-dim);
+      min-height: 60px;
+      white-space: pre-line;
+    }
+    .log .log-line {
+      display: block;
+      opacity: 0;
+      animation: log-in 0.3s ease-out forwards;
+    }
+    @keyframes log-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* === PACKET ==================================================== */
+    .packet {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      background: var(--accent-hot);
+      color: #000;
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+      padding: 3px 8px;
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 0 12px var(--accent-hot);
+      z-index: 10;
+    }
+    .packet-response { background: var(--accent); color: #000; }
+    .packet-queued   { background: var(--text-dim); color: #000; }
+
+    /* Wires use is-dim/is-active state via the same data-traceable hook */
+    [data-traceable] { transition: opacity 0.25s, stroke 0.25s, fill 0.25s; }
+
+    /* === DIAGRAM SCAFFOLD ========================================== */
+    .diagram {
+      margin: 32px auto;
+      max-width: 100%;
+      overflow-x: auto;
+      padding: 0;
+      position: relative;
+      background: var(--surface);
+      border: 1px solid var(--border-dim);
+    }
+    .diagram svg { display: block; }
+    .diagram figcaption {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 12px 16px;
+      border-top: 1px solid var(--border-dim);
+      background: #000;
+    }
+    .diagram .controls {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      border-top: 1px solid var(--border-dim);
+      background: #000;
+    }
+    .diagram .controls button {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 12px;
+      cursor: pointer;
+      clip-path: var(--bevel);
+    }
+    .diagram .controls button:hover  { background: var(--surface-hi); }
+    .diagram .controls button:focus  { outline: 2px solid var(--accent-hot); outline-offset: 2px; }
+    .overview-stack { position: absolute; inset: 0; }
+
+    /* Active wires brighten */
+    [data-traceable].is-active { stroke: var(--accent); opacity: 1; }
+    [data-traceable].is-dim    { opacity: 0.45; }
+
+    .constraints {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .constraint {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      clip-path: var(--bevel);
+      padding: 18px 20px 22px;
+    }
+    .constraint h3 { margin: 12px 0 8px; font-size: 14px; font-weight: 700; }
+    .constraint h3 code { color: var(--accent); font-weight: 700; }
+    .constraint p { margin: 0; font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+    .runbook-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .runbook-card {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      clip-path: var(--bevel);
+      padding: 20px 22px 24px;
+    }
+    .runbook-card h3   { margin: 12px 0 8px; font-size: 15px; font-weight: 700; }
+    .runbook-card h3 code { color: var(--accent); }
+    .runbook-card p    { margin: 0 0 10px; font-size: 13px; color: var(--text-dim); }
+    .runbook-card pre  {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      background: #000;
+      border-left: 3px solid var(--accent);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="doc-header">
+      <h1>DGX Spark LLM Stack</h1>
+      <p class="subtitle">
+        A visual tour of how this stack runs locally on a single NVIDIA DGX Spark (GB10):
+        the layers, the request flow, the deploy flow, and the hardware constraints that
+        shape every design choice.
+      </p>
+    </header>
+
+    <section id="overview">
+      <h2>Section 1 · Stack overview</h2>
+      <p class="section-title">Three layers, one packet</p>
+      <p>
+        Every request to this stack travels the same path: an OpenAI-compatible client
+        hits <strong>LiteLLM</strong> on port 4000, which resolves the model alias and
+        forwards to <strong>KubeAI</strong> on port 8000, which routes to the right
+        <strong>vLLM</strong> pod for inference. The diagram below loops the round trip.
+      </p>
+
+      <figure class="diagram" id="overview-diagram">
+        <svg viewBox="0 0 400 480" width="400" height="480" aria-hidden="true">
+          <!-- Wires (precomputed paths for packet animation) -->
+          <path id="wire-overview-client-litellm" d="M200,90 L200,150"  fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-overview-litellm-kubeai" d="M200,210 L200,270" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-overview-kubeai-vllm"    d="M200,330 L200,390" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+        </svg>
+
+        <!-- Overlay HTML tiles positioned over the SVG via absolute coordinates -->
+        <div class="overview-stack">
+          <div id="overview-client" class="tile is-dim" data-traceable style="position:absolute;left:140px;top:30px;width:120px">
+            <div class="tile-head">Client</div>
+            <div class="tile-body">curl · IDE · SDK<div class="tile-meta">:4000</div></div>
+          </div>
+          <div id="overview-litellm" class="tile is-dim" data-traceable style="position:absolute;left:120px;top:150px;width:160px">
+            <div class="tile-head">LiteLLM Proxy</div>
+            <div class="tile-body">aliases · auth · retry<div class="tile-meta">:4000</div></div>
+          </div>
+          <div id="overview-kubeai" class="tile is-dim" data-traceable style="position:absolute;left:120px;top:270px;width:160px">
+            <div class="tile-head">KubeAI Gateway</div>
+            <div class="tile-body">scale-from-zero<div class="tile-meta">:8000</div></div>
+          </div>
+          <div id="overview-vllm" class="tile is-dim" data-traceable style="position:absolute;left:140px;top:390px;width:120px">
+            <div class="tile-head">vLLM Pod</div>
+            <div class="tile-body">SM_121 · FP8 KV<div class="tile-meta">model · GPU</div></div>
+          </div>
+        </div>
+
+        <figcaption>
+          <strong>Stack overview.</strong> Animation auto-loops. A request packet rides
+          from Client → LiteLLM → KubeAI → vLLM, then a response packet rides back. Each
+          hop highlights the active component briefly.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="hardware">
+      <h2>Section 2 · Hardware constraints</h2>
+      <p class="section-title">Why this stack looks the way it does</p>
+      <p>
+        The GB10 is not a datacenter GPU. It is a single SoC with unified CPU+GPU memory,
+        compute capability <code>SM_121</code>, and a fixed 128 GB pool. Every choice in this
+        stack — the vLLM args, the image we pull, the eviction thresholds — exists because of
+        one of the constraints below. None of these are tunable knobs. They are the rules.
+      </p>
+
+      <div class="constraints">
+        <div class="constraint">
+          <span class="badge">unified memory</span>
+          <h3><code>--gpu-memory-utilization=0.7</code></h3>
+          <p>Higher values OOM-kill the pod. The 0.7 budget leaves 30% for the OS, the model loader, and KV cache headroom.</p>
+        </div>
+        <div class="constraint">
+          <span class="badge">stability</span>
+          <h3><code>--enforce-eager</code></h3>
+          <p>Disables CUDA graph capture. Required on GB10 — graph capture deadlocks on unified memory in driver 590.x and is unstable on 580.x.</p>
+        </div>
+        <div class="constraint">
+          <span class="badge">kv cache</span>
+          <h3><code>--kv-cache-dtype=fp8</code></h3>
+          <p>FP8 KV cache is the only way 256K context per request fits in the unified memory budget. Halves KV memory at near-zero quality cost.</p>
+        </div>
+        <div class="constraint">
+          <span class="badge">arch</span>
+          <h3>SM_121 vLLM image</h3>
+          <p>Most upstream vLLM containers are compiled for SM_100. We pull <code>scitrera/dgx-spark-vllm:0.17.0-t5</code> which is built for SM_121 and ships Transformers 5.x.</p>
+        </div>
+        <div class="constraint">
+          <span class="badge">runtime</span>
+          <h3><code>runtimeClassName: nvidia</code></h3>
+          <p>K3s containerd default runtime does not see the GPU. KubeAI patches every model pod with the NVIDIA RuntimeClass via <code>modelServerPods.jsonPatches</code>.</p>
+        </div>
+        <div class="constraint">
+          <span class="badge">shm</span>
+          <h3>16 GiB <code>/dev/shm</code></h3>
+          <p>vLLM needs a real shared-memory mount for NCCL. Provided as an <code>emptyDir medium: Memory</code> volume sized to 16 GiB.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="config">
+      <h2>Section 3 · Configuration model</h2>
+      <p class="section-title">One source. Two consumers. Zero drift.</p>
+      <p>
+        Every model in the stack is defined exactly once — in the <code>models:</code> block of
+        <code>ansible/group_vars/all/vars.yml</code>. Two Jinja templates fan that single
+        definition out into two K8s objects: a KubeAI Model CRD (lifecycle) and a LiteLLM
+        ConfigMap (routing). Click ▶ below to watch a model definition flow through both.
+      </p>
+
+      <figure class="diagram" id="config-diagram">
+        <svg viewBox="0 0 800 380" width="100%" height="380" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
+          <!-- Wires -->
+          <path id="wire-config-vars-tpl1" d="M180,140 C260,140 260,90 340,90"   fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-config-vars-tpl2" d="M180,200 C260,200 260,290 340,290" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-config-tpl1-crd"  d="M540,90  C620,90  620,90  680,90"  fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-config-tpl2-cm"   d="M540,290 C620,290 620,290 680,290" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+        </svg>
+
+        <div style="position:absolute;inset:0">
+          <div id="config-vars" class="tile is-dim" data-traceable style="position:absolute;left:20px;top:130px;width:160px">
+            <div class="tile-head">vars.yml</div>
+            <div class="tile-body" style="font-family:var(--mono);font-size:10px;line-height:1.5">
+              models:<br>
+              &nbsp;&nbsp;qwen35-35b-a3b:<br>
+              &nbsp;&nbsp;&nbsp;&nbsp;url: hf://...<br>
+              &nbsp;&nbsp;&nbsp;&nbsp;aliases: [qwen35, gpt-4]
+            </div>
+          </div>
+
+          <div id="config-tpl1" class="tile is-dim" data-traceable style="position:absolute;left:340px;top:50px;width:200px">
+            <div class="tile-head">values-models.yaml.j2</div>
+            <div class="tile-body tile-meta">roles/kubeai/templates/</div>
+          </div>
+          <div id="config-tpl2" class="tile is-dim" data-traceable style="position:absolute;left:340px;top:250px;width:200px">
+            <div class="tile-head">deployment.yaml.j2</div>
+            <div class="tile-body tile-meta">roles/litellm/templates/</div>
+          </div>
+
+          <div id="config-crd" class="tile is-dim" data-traceable style="position:absolute;left:680px;top:50px;width:120px">
+            <div class="tile-head">Model CRD</div>
+            <div class="tile-body" style="font-family:var(--mono);font-size:10px">qwen35-35b-a3b</div>
+          </div>
+          <div id="config-cm" class="tile is-dim" data-traceable style="position:absolute;left:680px;top:250px;width:120px">
+            <div class="tile-head">ConfigMap</div>
+            <div class="tile-body" style="font-family:var(--mono);font-size:10px">qwen35<br>gpt-4<br>qwen3</div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button data-trace-action="play"  data-trace-target="config-diagram">▶ Play</button>
+          <button data-trace-action="pause" data-trace-target="config-diagram">⏸ Pause</button>
+          <button data-trace-action="reset" data-trace-target="config-diagram">↺ Reset</button>
+          <button data-trace-action="back"  data-trace-target="config-diagram">‹ Step</button>
+          <button data-trace-action="fwd"   data-trace-target="config-diagram">Step ›</button>
+        </div>
+        <figcaption>
+          <strong>Configuration fan-out.</strong> A change in <code>vars.yml</code> propagates
+          to both K8s objects with no manual sync. This is the single-source-of-truth pattern
+          that eliminates drift.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="deploy">
+      <h2>Section 4 · Deploy flow</h2>
+      <p class="section-title">Seven roles, in order, idempotent</p>
+      <p>
+        A fresh DGX Spark goes from bare OS to a running, validated LLM stack with one
+        command: <code>./setup.sh</code>. That command runs seven Ansible roles in order,
+        each producing a clean, observable end-state. Click ▶ to walk through the deploy.
+      </p>
+
+      <figure class="diagram" id="deploy-diagram">
+        <svg viewBox="0 0 1100 220" width="100%" height="220" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
+          <path id="wire-deploy-1-2" d="M140,110 L160,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-deploy-2-3" d="M300,110 L320,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-deploy-3-4" d="M460,110 L480,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-deploy-4-5" d="M620,110 L640,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-deploy-5-6" d="M780,110 L800,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-deploy-6-7" d="M940,110 L960,110" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+        </svg>
+
+        <div style="position:absolute;inset:0">
+          <div id="deploy-preflight"     class="tile is-dim" data-traceable style="position:absolute;left:0px;   top:30px;width:140px">
+            <div class="tile-head">preflight</div>
+            <div class="tile-body tile-meta">role 1 of 7</div>
+            <div id="deploy-log-preflight" class="log"></div>
+          </div>
+          <div id="deploy-prerequisites" class="tile is-dim" data-traceable style="position:absolute;left:160px; top:30px;width:140px">
+            <div class="tile-head">prerequisites</div>
+            <div class="tile-body tile-meta">role 2 of 7</div>
+            <div id="deploy-log-prerequisites" class="log"></div>
+          </div>
+          <div id="deploy-k3s"           class="tile is-dim" data-traceable style="position:absolute;left:320px; top:30px;width:140px">
+            <div class="tile-head">k3s</div>
+            <div class="tile-body tile-meta">role 3 of 7</div>
+            <div id="deploy-log-k3s" class="log"></div>
+          </div>
+          <div id="deploy-nvidia"        class="tile is-dim" data-traceable style="position:absolute;left:480px; top:30px;width:140px">
+            <div class="tile-head">nvidia_plugin</div>
+            <div class="tile-body tile-meta">role 4 of 7</div>
+            <div id="deploy-log-nvidia" class="log"></div>
+          </div>
+          <div id="deploy-kubeai"        class="tile is-dim" data-traceable style="position:absolute;left:640px; top:30px;width:140px">
+            <div class="tile-head">kubeai</div>
+            <div class="tile-body tile-meta">role 5 of 7</div>
+            <div id="deploy-log-kubeai" class="log"></div>
+          </div>
+          <div id="deploy-litellm"       class="tile is-dim" data-traceable style="position:absolute;left:800px; top:30px;width:140px">
+            <div class="tile-head">litellm</div>
+            <div class="tile-body tile-meta">role 6 of 7</div>
+            <div id="deploy-log-litellm" class="log"></div>
+          </div>
+          <div id="deploy-validation"    class="tile is-dim" data-traceable style="position:absolute;left:960px; top:30px;width:140px">
+            <div class="tile-head">validation</div>
+            <div class="tile-body tile-meta">role 7 of 7</div>
+            <div id="deploy-log-validation" class="log"></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button data-trace-action="play"  data-trace-target="deploy-diagram">▶ Play</button>
+          <button data-trace-action="pause" data-trace-target="deploy-diagram">⏸ Pause</button>
+          <button data-trace-action="reset" data-trace-target="deploy-diagram">↺ Reset</button>
+          <button data-trace-action="back"  data-trace-target="deploy-diagram">‹ Step</button>
+          <button data-trace-action="fwd"   data-trace-target="deploy-diagram">Step ›</button>
+        </div>
+        <figcaption>
+          <strong>Deploy flow.</strong> The roles run left-to-right. Each role is idempotent —
+          re-running <code>setup.sh</code> after a partial failure picks up exactly where it
+          left off.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="request-warm">
+      <h2>Section 5 · Request flow (warm path)</h2>
+      <p class="section-title">A happy-path call to qwen35</p>
+      <p>
+        Qwen 3.5 runs with <code>min_replicas: 1</code> — it is always warm. This is what a
+        typical request looks like end to end: alias resolution at LiteLLM, pod lookup at
+        KubeAI, tokenization and generation at vLLM, response back up the stack. ~2.8s.
+      </p>
+
+      <figure class="diagram" id="warm-diagram">
+        <svg viewBox="0 0 900 400" width="100%" height="400" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
+          <path id="wire-warm-client-litellm" d="M120,60  L120,140" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-warm-litellm-kubeai" d="M120,220 L120,300" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-warm-kubeai-vllm"    d="M380,300 L600,300" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+        </svg>
+
+        <div style="position:absolute;inset:0">
+          <div id="warm-client" class="tile is-dim" data-traceable style="position:absolute;left:60px;top:0px;width:120px">
+            <div class="tile-head">Client</div>
+            <div class="tile-body tile-meta">curl · IDE</div>
+          </div>
+          <div id="warm-litellm" class="tile is-dim" data-traceable style="position:absolute;left:20px;top:140px;width:200px">
+            <div class="tile-head">LiteLLM Proxy :4000</div>
+            <div id="warm-log-litellm" class="log"></div>
+          </div>
+          <div id="warm-kubeai" class="tile is-dim" data-traceable style="position:absolute;left:200px;top:260px;width:180px">
+            <div class="tile-head">KubeAI Gateway :8000</div>
+            <div id="warm-log-kubeai" class="log"></div>
+          </div>
+          <div id="warm-vllm" class="tile is-dim" data-traceable style="position:absolute;left:600px;top:240px;width:240px">
+            <div class="tile-head">vLLM · qwen35-35b-a3b <span class="dot"></span></div>
+            <div id="warm-log-vllm" class="log"></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button data-trace-action="play"  data-trace-target="warm-diagram">▶ Play</button>
+          <button data-trace-action="pause" data-trace-target="warm-diagram">⏸ Pause</button>
+          <button data-trace-action="reset" data-trace-target="warm-diagram">↺ Reset</button>
+          <button data-trace-action="back"  data-trace-target="warm-diagram">‹ Step</button>
+          <button data-trace-action="fwd"   data-trace-target="warm-diagram">Step ›</button>
+        </div>
+        <figcaption>
+          <strong>Warm-path request.</strong> Total round trip ≈ 2.8s. Compare with the
+          scale-from-zero animation in Section 6 to see why <code>min_replicas: 1</code>
+          matters for frequently-used models.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="request-cold">
+      <h2>Section 6 · Request flow (scale-from-zero)</h2>
+      <p class="section-title">What a cold start looks like for qwen3</p>
+      <p>
+        Qwen 3 runs with <code>min_replicas: 0</code>. Until the first request arrives, no
+        pod exists. When KubeAI sees the request, it parks it briefly, scales the model up,
+        waits for the pod to become Ready, then releases the request to the new pod. Total
+        round trip ≈ <strong>75 seconds</strong>. This is why frequently-used models live at
+        <code>min_replicas: 1</code>.
+      </p>
+
+      <figure class="diagram" id="cold-diagram">
+        <svg viewBox="0 0 900 460" width="100%" height="460" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
+          <path id="wire-cold-client-litellm" d="M120,60  L120,140" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-cold-litellm-kubeai" d="M120,220 L120,300" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+          <path id="wire-cold-kubeai-vllm"    d="M380,300 L600,300" fill="none" stroke="var(--border-dim)" stroke-width="2" data-traceable />
+        </svg>
+
+        <div style="position:absolute;inset:0">
+          <div id="cold-client" class="tile is-dim" data-traceable style="position:absolute;left:60px;top:0px;width:120px">
+            <div class="tile-head">Client</div>
+            <div class="tile-body tile-meta">curl · IDE</div>
+          </div>
+          <div id="cold-litellm" class="tile is-dim" data-traceable style="position:absolute;left:20px;top:140px;width:200px">
+            <div class="tile-head">LiteLLM Proxy :4000</div>
+            <div id="cold-log-litellm" class="log"></div>
+          </div>
+          <div id="cold-kubeai" class="tile is-dim" data-traceable style="position:absolute;left:200px;top:260px;width:180px">
+            <div class="tile-head">KubeAI Gateway :8000 · queue: <span id="cold-queue" data-kind="counter">0</span></div>
+            <div id="cold-log-kubeai" class="log"></div>
+          </div>
+          <div id="cold-vllm" class="tile is-dim" data-traceable style="position:absolute;left:600px;top:240px;width:240px">
+            <div class="tile-head">vLLM · qwen3-30b-a3b <span id="cold-dot" class="dot cold"></span></div>
+            <div class="tile-body tile-meta" id="cold-state-line">state: (no pod)</div>
+            <div id="cold-log-vllm" class="log"></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button data-trace-action="play"  data-trace-target="cold-diagram">▶ Play</button>
+          <button data-trace-action="pause" data-trace-target="cold-diagram">⏸ Pause</button>
+          <button data-trace-action="reset" data-trace-target="cold-diagram">↺ Reset</button>
+          <button data-trace-action="back"  data-trace-target="cold-diagram">‹ Step</button>
+          <button data-trace-action="fwd"   data-trace-target="cold-diagram">Step ›</button>
+        </div>
+        <figcaption>
+          <strong>Cold-start request.</strong> The middle act — pod creation, image pull,
+          weight load — is the entire reason behind the <code>min_replicas: 1</code> setting
+          for any model that gets called more than once a day.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="runbook">
+      <h2>Section 7 · Operational runbook</h2>
+      <p class="section-title">When something breaks, look here first</p>
+      <p>
+        The five most common failure modes on this stack and exactly what to look at when
+        they happen. Each card lists the symptom you'll see, the most likely cause, and the
+        one or two commands that resolve or diagnose it.
+      </p>
+
+      <div class="runbook-grid">
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>Pod stuck in <code>Pending</code> after install</h3>
+          <p><strong>Likely cause:</strong> NVIDIA device plugin not running or containerd runtime not configured.</p>
+          <pre>kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
+# null → re-run setup.sh --tags k3s,nvidia</pre>
+        </div>
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>Qwen 3 first request times out</h3>
+          <p><strong>Likely cause:</strong> Cold start exceeded the LiteLLM timeout. Expected behavior — see Section 6.</p>
+          <pre>kubectl -n llm-stack get pods -l model=qwen3-30b-a3b
+# Wait until Ready, then retry. Or set min_replicas: 1.</pre>
+        </div>
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>vLLM pod CrashLoopBackOff with <code>SM_100</code> in log</h3>
+          <p><strong>Likely cause:</strong> Pulled a vLLM image not built for SM_121. Use a scitrera build.</p>
+          <pre>kubectl -n llm-stack logs &lt;pod&gt; --previous | head -50
+# Then update vllm_image in vars.yml and re-run --tags kubeai</pre>
+        </div>
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>LiteLLM 404 on a model name</h3>
+          <p><strong>Likely cause:</strong> ConfigMap rendered from stale <code>vars.yml</code>. The role auto-restarts but only on template change.</p>
+          <pre>./setup.sh --tags litellm,validate</pre>
+        </div>
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>Zombie pods stuck in <code>Unknown</code> after reboot</h3>
+          <p><strong>Likely cause:</strong> Unclean shutdown. Controller-manager GC is set to 10 — should clear within seconds. If it doesn't:</p>
+          <pre>scripts/recover-from-reboot.sh
+# or: kubectl delete pod --force --grace-period=0 &lt;name&gt;</pre>
+        </div>
+        <div class="runbook-card">
+          <span class="badge">symptom</span>
+          <h3>OOM kill on a vLLM pod under load</h3>
+          <p><strong>Likely cause:</strong> Someone tuned <code>--gpu-memory-utilization</code> above 0.7. Don't.</p>
+          <pre>grep gpu_memory_utilization ansible/group_vars/all/vars.yml
+# Must be 0.7 — see Section 2.</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sections will be added here in subsequent tasks -->
+  </div>
+<script>
+/* === Trace — declarative animation engine ====================== */
+/*
+ * Drives any number of step-based animations against an SVG/DOM root.
+ * Each step is a plain object describing what to highlight, dim, log,
+ * change state on, and which packets to fly along which SVG path.
+ *
+ * Step shape:
+ *   {
+ *     duration: 800,                    // ms; ignored when mode==='click'
+ *     highlight: ['#litellm'],          // selectors → .is-active
+ *     dim:       ['#kubeai-pod'],       // selectors → .is-dim
+ *     packets: [
+ *       { pathId: 'wire-litellm-to-kubeai',
+ *         label:  'route: gpt-4 → qwen35',
+ *         kind:   'request',            // 'request' | 'response' | 'queued'
+ *         duration: 700 }
+ *     ],
+ *     logs: { '#litellm-log': ['line A', 'line B'] },
+ *     state: { '#qwen3-pod': 'Ready', '#qwen3-counter': '1' }
+ *   }
+ */
+class Trace {
+  constructor(rootEl, steps, opts = {}) {
+    this.root  = rootEl;
+    this.steps = steps;
+    this.mode  = opts.mode || 'click';   // 'click' or 'auto'
+    this.cursor = -1;
+    this.timer  = null;
+    this.running = false;
+    this.onComplete = opts.onComplete || null;
+    this._generation = 0;  // bumped on reset/destroy to cancel in-flight RAF callbacks (Fix 3)
+
+    // Pre-scan steps to collect what reset() needs to restore.
+    // - State snapshots: initial textContent of every selector that any step mutates.
+    // - Log selectors:  every selector any step appends log lines into.
+    this._stateSnapshots = [];   // [{ el, text }]
+    this._logSelectors   = new Set();
+    const seenStateSelectors = new Set();
+    (steps || []).forEach(step => {
+      Object.keys(step.state || {}).forEach(sel => {
+        if (seenStateSelectors.has(sel)) return;
+        seenStateSelectors.add(sel);
+        rootEl.querySelectorAll(sel).forEach(el => {
+          this._stateSnapshots.push({ el, text: el.textContent });
+        });
+      });
+      Object.keys(step.logs || {}).forEach(sel => this._logSelectors.add(sel));
+    });
+
+    this.reset();
+  }
+
+  // Reset to initial state: dim everything controllable, clear logs, restore initial text.
+  reset() {
+    this.cursor = -1;
+    this.running = false;
+    this._generation++;  // cancel any in-flight packet animations (Fix 3)
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.root.querySelectorAll('.is-active').forEach(el => el.classList.remove('is-active'));
+    // Clear log areas tracked at construction time (Fix 2).
+    this._logSelectors.forEach(sel => {
+      this.root.querySelectorAll(sel).forEach(el => { el.innerHTML = ''; });
+    });
+    // Restore initial textContent of every state-target snapshot (Fix 2).
+    this._stateSnapshots.forEach(({ el, text }) => { el.textContent = text; });
+    // Wires and components default to dim until a step lights them.
+    this.root.querySelectorAll('[data-traceable]').forEach(el => el.classList.add('is-dim'));
+    this._removePackets();
+  }
+
+  play() {
+    if (this.running) return;
+    this.running = true;
+    this._tick();
+  }
+
+  pause() {
+    this.running = false;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+  }
+
+  stepForward() {
+    this.pause();
+    if (this.cursor + 1 < this.steps.length) {
+      this.cursor += 1;
+      this._applyStep(this.steps[this.cursor]);
+    }
+  }
+
+  stepBack() {
+    this.pause();
+    if (this.cursor <= 0) { this.reset(); return; }
+    // Re-run from start up to cursor-1 to reach a clean previous state.
+    const target = this.cursor - 1;
+    this.reset();
+    for (let i = 0; i <= target; i++) {
+      this.cursor = i;
+      this._applyStep(this.steps[i]);
+    }
+  }
+
+  destroy() {
+    this.pause();
+    this._generation++;  // cancel any in-flight packet animations (Fix 3)
+    this._removePackets();
+  }
+
+  // Internal --------------------------------------------------------
+
+  _tick() {
+    if (!this.running) return;
+    if (this.cursor + 1 >= this.steps.length) {
+      this.running = false;
+      if (this.onComplete) this.onComplete();
+      return;
+    }
+    this.cursor += 1;
+    const step = this.steps[this.cursor];
+    this._applyStep(step);
+    const wait = (step.duration != null) ? step.duration : (this.mode === 'auto' ? 800 : 1100);
+    this.timer = setTimeout(() => this._tick(), wait);
+  }
+
+  _applyStep(step) {
+    // Highlight & dim
+    (step.highlight || []).forEach(sel => {
+      this.root.querySelectorAll(sel).forEach(el => {
+        el.classList.remove('is-dim');
+        el.classList.add('is-active');
+      });
+    });
+    (step.dim || []).forEach(sel => {
+      this.root.querySelectorAll(sel).forEach(el => {
+        el.classList.remove('is-active');
+        el.classList.add('is-dim');
+      });
+    });
+    // Logs — append <span class="log-line"> per line
+    Object.entries(step.logs || {}).forEach(([sel, lines]) => {
+      this.root.querySelectorAll(sel).forEach(el => {
+        lines.forEach(line => {
+          const span = document.createElement('span');
+          span.className = 'log-line';
+          span.textContent = line;
+          el.appendChild(span);
+        });
+      });
+    });
+    // State — set textContent on the targeted element (tile labels, counters, state lines)
+    Object.entries(step.state || {}).forEach(([sel, value]) => {
+      this.root.querySelectorAll(sel).forEach(el => {
+        el.textContent = value;
+      });
+    });
+    // Packets — fly along precomputed paths
+    (step.packets || []).forEach(p => this._flyPacket(p));
+  }
+
+  _flyPacket({ pathId, label, kind = 'request', duration = 700 }) {
+    const path = this.root.querySelector('#' + pathId);
+    if (!path) {
+      console.warn('[Trace] missing path', pathId);
+      return;
+    }
+    const length = path.getTotalLength();
+    const packet = document.createElement('div');
+    packet.className = 'packet packet-' + kind;
+    packet.textContent = label;
+    this.root.appendChild(packet);
+
+    const gen = this._generation;  // capture at creation; bail if reset/destroy changes it (Fix 3)
+    const startTime = performance.now();
+    const animate = (now) => {
+      // Cancel if reset()/destroy() bumped the generation since this packet was created.
+      if (this._generation !== gen) { packet.remove(); return; }
+      // Guard against null CTM when SVG is not laid out / hidden (Fix 4).
+      const svg = path.ownerSVGElement;
+      const ctm = svg && svg.getScreenCTM();
+      if (!ctm) { packet.remove(); return; }
+      const t = Math.min(1, (now - startTime) / duration);
+      const point = path.getPointAtLength(length * t);
+      // Convert SVG-local coords to root-relative coords (assumes no rotation/skew).
+      const rootRect = this.root.getBoundingClientRect();
+      const x = point.x * ctm.a + ctm.e - rootRect.left;
+      const y = point.y * ctm.d + ctm.f - rootRect.top;
+      packet.style.left = x + 'px';
+      packet.style.top  = y + 'px';
+      if (t < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        // Linger briefly, then remove (cancellation re-checked on the timeout via a generation snapshot).
+        const lingerGen = this._generation;
+        setTimeout(() => {
+          if (this._generation === lingerGen) packet.remove();
+          else packet.remove();  // either way, remove; this branch documents intent
+        }, 250);
+      }
+    };
+    requestAnimationFrame(animate);
+  }
+
+  _removePackets() {
+    this.root.querySelectorAll('.packet').forEach(p => p.remove());
+  }
+}
+
+/* === Reduced motion shim — short-circuit traces if user prefers === */
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* === Trace registry — diagrams self-register here ============== */
+window.traces = [];
+function registerTrace(t) { window.traces.push(t); return t; }
+
+console.log('[architecture.html] Trace engine loaded.');
+
+/* === Smoke test — runs once on load ============================ */
+(function smokeTest() {
+  const sandbox = document.createElement('div');
+  sandbox.style.cssText = 'position:relative;width:300px;height:80px;visibility:hidden';
+  sandbox.innerHTML = `
+    <svg id="smoke-svg" viewBox="0 0 300 80" width="300" height="80">
+      <path id="smoke-path" d="M20,40 L280,40" fill="none" />
+    </svg>
+    <div id="smoke-log" class="log" data-traceable></div>
+  `;
+  document.body.appendChild(sandbox);
+
+  const trace = new Trace(sandbox, [
+    { logs: { '#smoke-log': ['hello'] }, duration: 0 },
+    { logs: { '#smoke-log': ['world'] }, duration: 0 },
+    { packets: [{ pathId: 'smoke-path', label: 'PING', kind: 'request', duration: 100 }], duration: 0 },
+  ], { mode: 'auto' });
+
+  let passed = true;
+  try {
+    trace.stepForward();
+    trace.stepForward();
+    if (sandbox.querySelectorAll('#smoke-log .log-line').length !== 2) passed = false;
+    trace.stepForward();
+    if (!sandbox.querySelector('.packet')) passed = false;
+    trace.destroy();
+  } catch (e) {
+    passed = false;
+    console.error('[smoke test] threw', e);
+  }
+  sandbox.remove();
+  console.log('[smoke test] ' + (passed ? 'PASS ✓' : 'FAIL ✗'));
+})();
+
+/* === Animation 1: Stack overview hero (auto-loop) ============== */
+(function overviewAnimation() {
+  const root = document.getElementById('overview-diagram');
+  if (!root) return;
+
+  const steps = [
+    { highlight: ['#overview-client', '#wire-overview-client-litellm'],
+      packets:   [{ pathId: 'wire-overview-client-litellm', label: 'POST /v1/chat/completions', kind: 'request' }],
+      duration:  900 },
+    { highlight: ['#overview-litellm', '#wire-overview-litellm-kubeai'],
+      packets:   [{ pathId: 'wire-overview-litellm-kubeai', label: 'route → qwen35', kind: 'request' }],
+      duration:  900 },
+    { highlight: ['#overview-kubeai', '#wire-overview-kubeai-vllm'],
+      packets:   [{ pathId: 'wire-overview-kubeai-vllm', label: 'pod 10.42.0.17', kind: 'request' }],
+      duration:  900 },
+    { highlight: ['#overview-vllm'],
+      duration:  600 },
+    { packets:   [{ pathId: 'wire-overview-kubeai-vllm', label: '200 OK', kind: 'response', duration: 700 }],
+      duration:  900 },
+    { packets:   [{ pathId: 'wire-overview-litellm-kubeai', label: '200 OK', kind: 'response', duration: 700 }],
+      duration:  900 },
+    { packets:   [{ pathId: 'wire-overview-client-litellm', label: '200 OK', kind: 'response', duration: 700 }],
+      duration:  900 },
+    { duration: 700 },  // pause before loop
+  ];
+
+  if (REDUCED_MOTION) {
+    // Render final lit state, no motion
+    root.querySelectorAll('[data-traceable]').forEach(el => {
+      el.classList.remove('is-dim');
+      el.classList.add('is-active');
+    });
+    return;
+  }
+
+  const trace = new Trace(root, steps, {
+    mode: 'auto',
+    onComplete: () => { trace.reset(); trace.play(); },
+  });
+  registerTrace(trace);
+
+  // Start when visible
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) trace.play();
+      else trace.pause();
+    });
+  }, { threshold: 0.3 });
+  io.observe(root);
+})();
+
+/* === Animation 2: Configuration model (click-to-play) ========== */
+(function configAnimation() {
+  const root = document.getElementById('config-diagram');
+  if (!root) return;
+
+  const steps = [
+    { highlight: ['#config-vars'], duration: null },
+    { highlight: ['#wire-config-vars-tpl1', '#config-tpl1'],
+      packets: [{ pathId: 'wire-config-vars-tpl1', label: 'render', kind: 'request', duration: 700 }],
+      duration: null },
+    { highlight: ['#wire-config-tpl1-crd', '#config-crd'],
+      packets: [{ pathId: 'wire-config-tpl1-crd', label: 'Model/qwen35', kind: 'request', duration: 700 }],
+      duration: null },
+    { highlight: ['#wire-config-vars-tpl2', '#config-tpl2'],
+      packets: [{ pathId: 'wire-config-vars-tpl2', label: 'render', kind: 'request', duration: 700 }],
+      duration: null },
+    { highlight: ['#wire-config-tpl2-cm', '#config-cm'],
+      packets: [{ pathId: 'wire-config-tpl2-cm', label: 'routes', kind: 'request', duration: 700 }],
+      duration: null },
+  ];
+
+  if (REDUCED_MOTION) {
+    root.querySelectorAll('[data-traceable]').forEach(el => {
+      el.classList.remove('is-dim');
+      el.classList.add('is-active');
+    });
+    return;
+  }
+
+  const trace = new Trace(root, steps, { mode: 'click' });
+  registerTrace(trace);
+  bindControls(root, trace);
+})();
+
+/* Shared control wiring used by every click-to-play diagram */
+function bindControls(root, trace) {
+  root.querySelectorAll('[data-trace-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.traceAction;
+      if      (action === 'play')  { trace.play(); }
+      else if (action === 'pause') { trace.pause(); }
+      else if (action === 'reset') { trace.reset(); }
+      else if (action === 'fwd')   { trace.stepForward(); }
+      else if (action === 'back')  { trace.stepBack(); }
+    });
+  });
+}
+
+/* === Animation 3: Deploy flow (click-to-play) ================== */
+/*
+ * STEP LIST RESERVED FOR USER AUTHORING.
+ *
+ * The seven role tiles' log lines must be written by the repo author who knows
+ * what each Ansible role really outputs and what's worth surfacing to a new SRE.
+ * Each tile entry below has a placeholder array — will be replaced in a follow-up
+ * commit with real log lines for that role.
+ */
+(function deployAnimation() {
+  const root = document.getElementById('deploy-diagram');
+  if (!root) return;
+
+  const ROLE_LOGS = {
+    preflight:     ['nvidia-smi → GB10 · driver 580.x',
+                    'compute cap 12.1 ✓',
+                    'disk 1.4T free · container-runtime ✓'],
+    prerequisites: ['apt: helm, jq, python3 ✓',
+                    'uv → /usr/local/bin ✓'],
+    k3s:           ['sysctl 90-kubelet ✓',
+                    'templated /etc/rancher/k3s/config.yaml',
+                    'installing K3s server · runtime: nvidia ✓',
+                    'kubeconfig → ~/.kube/config ✓'],
+    nvidia:        ['helm install nvidia-device-plugin ✓',
+                    'allocatable: nvidia.com/gpu = 1 ✓'],
+    kubeai:        ['helm install kubeai ✓',
+                    'Model/qwen35-35b-a3b · Model/qwen3-30b-a3b ✓',
+                    'kubeai-huggingface secret ✓'],
+    litellm:       ['templated ConfigMap from vars.yml',
+                    'kubectl rollout restart ✓ · :4000 ready'],
+    validation:    ['wait model/qwen35 ready ... ✓',
+                    'GET /health/readiness 200',
+                    'POST /v1/chat/completions 200 ✓'],
+  };
+
+  // Build steps: for each role, highlight its tile, light the inbound wire,
+  // and stream its log lines.
+  const tiles = ['preflight','prerequisites','k3s','nvidia','kubeai','litellm','validation'];
+  const wires = [null, 'wire-deploy-1-2', 'wire-deploy-2-3', 'wire-deploy-3-4',
+                 'wire-deploy-4-5', 'wire-deploy-5-6', 'wire-deploy-6-7'];
+
+  const steps = tiles.map((tile, i) => ({
+    highlight: ['#deploy-' + tile, ...(wires[i] ? ['#' + wires[i]] : [])],
+    logs: { ['#deploy-log-' + tile]: ROLE_LOGS[tile] },
+    duration: null,  // click-to-play default 1100ms
+  }));
+
+  if (REDUCED_MOTION) {
+    root.querySelectorAll('[data-traceable]').forEach(el => {
+      el.classList.remove('is-dim');
+      el.classList.add('is-active');
+    });
+    Object.entries(ROLE_LOGS).forEach(([tile, lines]) => {
+      const log = root.querySelector('#deploy-log-' + tile);
+      lines.forEach(line => {
+        const span = document.createElement('span');
+        span.className = 'log-line';
+        span.textContent = line;
+        log.appendChild(span);
+      });
+    });
+    return;
+  }
+
+  const trace = new Trace(root, steps, { mode: 'click' });
+  registerTrace(trace);
+  bindControls(root, trace);
+})();
+
+/* === Animation 4: Request flow, warm path ====================== */
+(function warmAnimation() {
+  const root = document.getElementById('warm-diagram');
+  if (!root) return;
+
+  const steps = [
+    { highlight: ['#warm-client', '#wire-warm-client-litellm'],
+      packets: [{ pathId: 'wire-warm-client-litellm', label: 'POST /v1/chat/completions {model:"gpt-4"}', kind: 'request' }],
+      duration: null },
+    { highlight: ['#warm-litellm'],
+      logs: { '#warm-log-litellm': ['auth: master-key ✓', 'route: gpt-4 → openai/qwen35-35b-a3b'] },
+      duration: null },
+    { highlight: ['#wire-warm-litellm-kubeai'],
+      packets: [{ pathId: 'wire-warm-litellm-kubeai', label: 'model=qwen35-35b-a3b', kind: 'request' }],
+      duration: null },
+    { highlight: ['#warm-kubeai'],
+      logs: { '#warm-log-kubeai': ['lookup Model/qwen35-35b-a3b', 'replicas=1, route → 10.42.0.17'] },
+      duration: null },
+    { highlight: ['#wire-warm-kubeai-vllm'],
+      packets: [{ pathId: 'wire-warm-kubeai-vllm', label: 'pod 10.42.0.17', kind: 'request' }],
+      duration: null },
+    { highlight: ['#warm-vllm'],
+      logs: { '#warm-log-vllm': ['tokenize prompt → 47 tokens', 'generating ▌ 0 → 142 tok', 'finish_reason=stop'] },
+      duration: 1500 },
+    { packets: [{ pathId: 'wire-warm-kubeai-vllm', label: '200 OK · 142 tok', kind: 'response' }],
+      duration: null },
+    { logs: { '#warm-log-kubeai': ['↩ forwarded'] },
+      packets: [{ pathId: 'wire-warm-litellm-kubeai', label: '200 OK', kind: 'response' }],
+      duration: null },
+    { logs: { '#warm-log-litellm': ['↩ forwarded'] },
+      packets: [{ pathId: 'wire-warm-client-litellm', label: '200 OK', kind: 'response' }],
+      duration: null },
+    { highlight: ['#warm-client'],
+      duration: null },
+  ];
+
+  if (REDUCED_MOTION) {
+    root.querySelectorAll('[data-traceable]').forEach(el => {
+      el.classList.remove('is-dim');
+      el.classList.add('is-active');
+    });
+    // Pre-populate log lines so reduced-motion users see them
+    const logs = {
+      '#warm-log-litellm': ['auth: master-key ✓', 'route: gpt-4 → openai/qwen35-35b-a3b', '↩ forwarded'],
+      '#warm-log-kubeai':  ['lookup Model/qwen35-35b-a3b', 'replicas=1, route → 10.42.0.17', '↩ forwarded'],
+      '#warm-log-vllm':    ['tokenize prompt → 47 tokens', 'generating ▌ 0 → 142 tok', 'finish_reason=stop'],
+    };
+    Object.entries(logs).forEach(([sel, lines]) => {
+      const el = root.querySelector(sel);
+      if (!el) return;
+      lines.forEach(line => {
+        const span = document.createElement('span');
+        span.className = 'log-line';
+        span.textContent = line;
+        el.appendChild(span);
+      });
+    });
+    return;
+  }
+
+  const trace = new Trace(root, steps, { mode: 'click' });
+  registerTrace(trace);
+  bindControls(root, trace);
+})();
+
+/* === Animation 5: Request flow, scale-from-zero ================ */
+(function coldAnimation() {
+  const root = document.getElementById('cold-diagram');
+  if (!root) return;
+
+  const steps = [
+    // 1. Request arrives at LiteLLM
+    { highlight: ['#cold-client', '#wire-cold-client-litellm'],
+      packets: [{ pathId: 'wire-cold-client-litellm', label: 'POST /v1/chat/completions {model:"qwen3"}', kind: 'request' }],
+      duration: null },
+    { highlight: ['#cold-litellm'],
+      logs: { '#cold-log-litellm': ['route: qwen3 → openai/qwen3-30b-a3b'] },
+      duration: null },
+    // 2. LiteLLM → KubeAI
+    { highlight: ['#wire-cold-litellm-kubeai'],
+      packets: [{ pathId: 'wire-cold-litellm-kubeai', label: 'model=qwen3-30b-a3b', kind: 'request' }],
+      duration: null },
+    // 3. KubeAI sees replicas=0, parks request
+    { highlight: ['#cold-kubeai'],
+      logs: { '#cold-log-kubeai': ['lookup Model/qwen3-30b-a3b', 'replicas=0 → queue request'] },
+      state: { '#cold-queue': '1' },
+      duration: null },
+    // 4. KubeAI scales up
+    { logs: { '#cold-log-kubeai': ['scaling up qwen3-30b-a3b', 'replicas: 0 → 1'] },
+      state: { '#cold-state-line': 'state: Pending' },
+      duration: null },
+    // 5. Pod walks states with auto-advance durations
+    { state: { '#cold-state-line': 'state: ContainerCreating' },
+      logs: { '#cold-log-vllm': ['scheduled to node spark-01'] },
+      duration: 1200 },
+    { state: { '#cold-state-line': 'state: PullingImage' },
+      logs: { '#cold-log-vllm': ['pulling scitrera/dgx-spark-vllm:0.17.0-t5'] },
+      duration: 1400 },
+    { state: { '#cold-state-line': 'state: Running · loading model' },
+      logs: { '#cold-log-vllm': ['mounting /data/hf-cache', 'loading weights ████ 73%'] },
+      duration: 1500 },
+    { state: { '#cold-state-line': 'state: Ready' },
+      logs: { '#cold-log-vllm': ['vLLM listening :8000 ✓'] },
+      highlight: ['#cold-vllm'],
+      duration: null },
+    // 6. KubeAI releases queued request to new pod
+    { highlight: ['#wire-cold-kubeai-vllm'],
+      logs: { '#cold-log-kubeai': ['releasing queued request → 10.42.0.31'] },
+      state: { '#cold-queue': '0' },
+      packets: [{ pathId: 'wire-cold-kubeai-vllm', label: 'queued → pod 10.42.0.31', kind: 'queued' }],
+      duration: null },
+    // 7. vLLM generates
+    { logs: { '#cold-log-vllm': ['tokenize → 47 tok', 'generating ▌ 0 → 142 tok', 'finish_reason=stop'] },
+      duration: 1500 },
+    // 8. Response back up
+    { packets: [{ pathId: 'wire-cold-kubeai-vllm', label: '200 OK · 142 tok', kind: 'response' }],
+      duration: null },
+    { logs: { '#cold-log-kubeai': ['↩ forwarded'] },
+      packets: [{ pathId: 'wire-cold-litellm-kubeai', label: '200 OK', kind: 'response' }],
+      duration: null },
+    { logs: { '#cold-log-litellm': ['↩ forwarded'] },
+      packets: [{ pathId: 'wire-cold-client-litellm', label: '200 OK', kind: 'response' }],
+      duration: null },
+    { highlight: ['#cold-client'],
+      duration: null },
+  ];
+
+  if (REDUCED_MOTION) {
+    root.querySelectorAll('[data-traceable]').forEach(el => {
+      el.classList.remove('is-dim');
+      el.classList.add('is-active');
+    });
+    // Pre-populate state, queue counter, and log streams
+    const stateLine = root.querySelector('#cold-state-line');
+    if (stateLine) stateLine.textContent = 'state: Ready';
+    const queue = root.querySelector('#cold-queue');
+    if (queue) queue.textContent = '0';
+    const logs = {
+      '#cold-log-litellm': ['route: qwen3 → openai/qwen3-30b-a3b', '↩ forwarded'],
+      '#cold-log-kubeai':  ['lookup Model/qwen3-30b-a3b', 'replicas=0 → queue request',
+                            'scaling up qwen3-30b-a3b', 'replicas: 0 → 1',
+                            'releasing queued request → 10.42.0.31', '↩ forwarded'],
+      '#cold-log-vllm':    ['scheduled to node spark-01',
+                            'pulling scitrera/dgx-spark-vllm:0.17.0-t5',
+                            'mounting /data/hf-cache', 'loading weights ████ 73%',
+                            'vLLM listening :8000 ✓',
+                            'tokenize → 47 tok', 'generating ▌ 0 → 142 tok', 'finish_reason=stop'],
+    };
+    Object.entries(logs).forEach(([sel, lines]) => {
+      const el = root.querySelector(sel);
+      if (!el) return;
+      lines.forEach(line => {
+        const span = document.createElement('span');
+        span.className = 'log-line';
+        span.textContent = line;
+        el.appendChild(span);
+      });
+    });
+    return;
+  }
+
+  const trace = new Trace(root, steps, { mode: 'click' });
+  registerTrace(trace);
+  bindControls(root, trace);
+})();
+</script>
+</body>
+</html>

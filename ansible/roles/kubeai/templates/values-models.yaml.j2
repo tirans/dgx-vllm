@@ -1,0 +1,24 @@
+# Managed by Ansible — do not edit manually
+# Source: ansible/roles/kubeai/templates/values-models.yaml.j2
+
+catalog:
+{% for model_name, model in models.items() %}
+{% if model.enabled | default(false) %}
+  {{ model_name }}:
+    enabled: true
+    features: {{ model.features | to_json }}
+    owner: {{ model.owner }}
+    url: "{{ model.url }}"
+    engine: VLLM
+    args:
+{% for arg in vllm_default_args %}
+      - "{{ arg }}"
+{% endfor %}
+{% for arg in model.extra_args | default([]) %}
+      - "{{ arg }}"
+{% endfor %}
+    resourceProfile: "{{ model.resource_profile | default('dgx-spark-gpu:1') }}"
+    minReplicas: {{ model.min_replicas | default(0) }}
+    maxReplicas: {{ model.max_replicas | default(1) }}
+{% endif %}
+{% endfor %}

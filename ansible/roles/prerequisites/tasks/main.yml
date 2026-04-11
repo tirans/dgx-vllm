@@ -1,0 +1,100 @@
+---
+# roles/prerequisites/tasks/main.yml — Install Helm, jq, and other dependencies
+
+- name: Ensure base packages are present
+  ansible.builtin.apt:
+    name:
+      - curl
+      - jq
+      - python3
+      - apt-transport-https
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure systemd journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Set journald retention drop-in (cap to 2G)
+  ansible.builtin.copy:
+    src: journald-llm-stack.conf
+    dest: /etc/systemd/journald.conf.d/llm-stack.conf
+    mode: "0644"
+  notify: Restart journald
+
+- name: Check if uv is in /usr/local/bin
+  ansible.builtin.stat:
+    path: /usr/local/bin/uv
+  register: uv_stat
+
+- name: Install uv to /usr/local/bin
+  when: not uv_stat.stat.exists
+  ansible.builtin.shell:
+    cmd: curl -LsSf https://astral.sh/uv/install.sh | sh
+  environment:
+    UV_INSTALL_DIR: /usr/local/bin
+    INSTALLER_NO_MODIFY_PATH: "1"
+
+- name: Install Python dependencies via uv
+  ansible.builtin.command:
+    cmd: /usr/local/bin/uv pip install --system --break-system-packages kubernetes>=24.2.0
+  register: uv_install
+  changed_when: "'Installed' in uv_install.stdout"
+
+- name: Check if Helm is installed
+  ansible.builtin.command:
+    cmd: helm version --short
+  register: helm_check
+  changed_when: false
+  failed_when: false
+
+- name: Install Helm via official script
+  when: helm_check.rc != 0
+  block:
+    - name: Download Helm install script
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: "0755"
+
+    - name: Run Helm install script
+      ansible.builtin.command:
+        cmd: /tmp/get_helm.sh
+      environment:
+        DESIRED_VERSION: ""  # empty = latest
+      register: helm_install
+      changed_when: "'is already latest' not in helm_install.stdout"
+
+    - name: Clean up Helm install script
+      ansible.builtin.file:
+        path: /tmp/get_helm.sh
+        state: absent
+
+- name: Verify Helm is available
+  ansible.builtin.command:
+    cmd: helm version --short
+  register: helm_version
+  changed_when: false
+
+- name: Display Helm version
+  ansible.builtin.debug:
+    msg: "Helm {{ helm_version.stdout }}"
+
+- name: Check if helm-diff plugin is installed
+  ansible.builtin.command:
+    cmd: helm plugin list
+  register: helm_plugins
+  changed_when: false
+  failed_when: false
+
+- name: Install helm-diff plugin
+  ansible.builtin.command:
+    cmd: helm plugin install https://github.com/databus23/helm-diff
+  when: "'diff' not in helm_plugins.stdout"
+  register: helm_diff_install
+  changed_when: helm_diff_install.rc == 0

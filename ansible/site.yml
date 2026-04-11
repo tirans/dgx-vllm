@@ -1,0 +1,40 @@
+---
+# site.yml — Master playbook for DGX Spark LLM Stack
+#
+# Usage:
+#   ansible-playbook site.yml                        # Full install
+#   ansible-playbook site.yml --check                # Dry run
+#   ansible-playbook site.yml --tags kubeai,litellm  # Partial run
+#   ansible-playbook site.yml --tags validate        # Health check only
+
+- name: Deploy LLM inference stack on DGX Spark
+  hosts: all
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Install required Ansible collections
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install -r requirements.yml
+      args:
+        chdir: "{{ playbook_dir }}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+      tags: [always]
+
+  roles:
+    - role: preflight
+      tags: [preflight, always]
+    - role: prerequisites
+      tags: [prerequisites]
+    - role: k3s
+      tags: [k3s]
+    - role: nvidia_plugin
+      tags: [nvidia]
+    - role: kubeai
+      tags: [kubeai]
+    - role: litellm
+      tags: [litellm]
+    - role: validation
+      tags: [validate]

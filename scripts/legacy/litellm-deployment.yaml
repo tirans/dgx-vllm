@@ -1,0 +1,138 @@
+# litellm/deployment.yaml — LiteLLM proxy on K3s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: llm-stack
+data:
+  proxy_config.yaml: |
+    model_list:
+      - model_name: gemma4
+        litellm_params:
+          model: openai/gemma4-26b-a4b
+          api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+          api_key: "ignored"
+
+      - model_name: gpt-4
+        litellm_params:
+          model: openai/gemma4-26b-a4b
+          api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+          api_key: "ignored"
+
+      - model_name: qwen35
+        litellm_params:
+          model: openai/qwen35-35b-a3b
+          api_base: http://kubeai.llm-stack.svc.cluster.local/openai/v1
+          api_key: "ignored"
+          timeout: 300
+
+    router_settings:
+      routing_strategy: "simple-shuffle"
+      num_retries: 2
+      timeout: 300
+      retry_after: 5
+
+    general_settings:
+      master_key: "os.environ/LITELLM_MASTER_KEY"
+
+    litellm_settings:
+      drop_params: true
+      set_verbose: false
+      request_timeout: 300
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secret
+  namespace: llm-stack
+type: Opaque
+stringData:
+  # Change this to a real key before deploying
+  master-key: "sk-dgxspark-litellm-change-me"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: llm-stack
+  labels:
+    app: litellm-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-proxy
+  template:
+    metadata:
+      labels:
+        app: litellm-proxy
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-latest
+          args:
+            - "--config"
+            - "/etc/litellm/proxy_config.yaml"
+            - "--port"
+            - "4000"
+            - "--num_workers"
+            - "2"
+          ports:
+            - containerPort: 4000
+              name: http
+              protocol: TCP
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master-key
+            # Uncomment for cloud fallback
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: cloud-api-keys
+            #       key: anthropic
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-proxy
+  namespace: llm-stack
+spec:
+  type: LoadBalancer      # exposes on LAN via kube-vip or NodePort
+  selector:
+    app: litellm-proxy
+  ports:
+    - port: 4000
+      targetPort: 4000
+      protocol: TCP
+      name: http

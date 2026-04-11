@@ -1,0 +1,87 @@
+---
+# roles/preflight/tasks/main.yml — Validate DGX Spark hardware and OS
+
+- name: Check nvidia-smi is available
+  ansible.builtin.command:
+    cmd: nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
+  register: nvidia_smi_output
+  changed_when: false
+  failed_when: nvidia_smi_output.rc != 0
+
+- name: Parse GPU information
+  ansible.builtin.set_fact:
+    gpu_name: "{{ nvidia_smi_output.stdout_lines[0].split(',')[0] | trim }}"
+    driver_version: "{{ nvidia_smi_output.stdout_lines[0].split(',')[1] | trim }}"
+    compute_capability: "{{ nvidia_smi_output.stdout_lines[0].split(',')[2] | trim }}"
+    gpu_count: "{{ nvidia_smi_output.stdout_lines | length }}"
+
+- name: Display GPU information
+  ansible.builtin.debug:
+    msg: >-
+      GPU: {{ gpu_name }},
+      Driver: {{ driver_version }},
+      Compute: {{ compute_capability }},
+      Count: {{ gpu_count }}
+
+- name: Verify NVIDIA driver version >= {{ min_driver_version }}
+  ansible.builtin.assert:
+    that:
+      - driver_version.split('.')[0] | int >= min_driver_version
+    fail_msg: >-
+      NVIDIA driver {{ driver_version }} is below minimum {{ min_driver_version }}.
+      DGX Spark GB10 requires driver >= 580.x. Note: driver 590.x has a known
+      CUDAGraph capture deadlock on GB10 unified memory.
+    success_msg: "NVIDIA driver {{ driver_version }} meets minimum requirement."
+
+- name: Verify nvidia-container-runtime is installed
+  ansible.builtin.command:
+    cmd: which nvidia-container-runtime
+  register: ncr_check
+  changed_when: false
+  failed_when: ncr_check.rc != 0
+
+- name: Check disk space on root filesystem
+  ansible.builtin.shell:
+    cmd: "df --output=avail -BG / | tail -1 | tr -dc '0-9'"
+  register: disk_avail_gb
+  changed_when: false
+
+- name: Verify disk space >= {{ min_disk_gb }}GB
+  ansible.builtin.assert:
+    that:
+      - disk_avail_gb.stdout | int >= min_disk_gb
+    fail_msg: >-
+      Only {{ disk_avail_gb.stdout }}GB available on /.
+      Need at least {{ min_disk_gb }}GB for model cache ({{ hf_cache_host_path }}).
+    success_msg: "{{ disk_avail_gb.stdout }}GB available on / — sufficient."
+
+- name: Verify OS family
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Debian"
+    fail_msg: >-
+      Expected Debian/Ubuntu-based OS (DGX Linux OS), got {{ ansible_os_family }}.
+    success_msg: "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+- name: Verify system clock is NTP-synchronized
+  ansible.builtin.command:
+    cmd: timedatectl show --property=NTPSynchronized --value
+  register: ntp_sync
+  changed_when: false
+
+- name: Assert clock is synchronized
+  ansible.builtin.assert:
+    that:
+      - ntp_sync.stdout == "yes"
+    fail_msg: >-
+      System clock is not NTP-synchronized. Run:
+      sudo systemctl enable --now systemd-timesyncd
+      then re-run setup.sh.
+    success_msg: "System clock is NTP-synchronized."
+
+- name: Preflight passed
+  ansible.builtin.debug:
+    msg: >-
+      Preflight OK — {{ gpu_name }} ({{ gpu_count }} GPU),
+      driver {{ driver_version }}, {{ disk_avail_gb.stdout }}GB free,
+      {{ ansible_distribution }} {{ ansible_distribution_version }}
