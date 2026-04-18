@@ -1,0 +1,46 @@
+# Example per-host overrides — copy this file to:
+#   host_vars/<inventory-hostname>/vars.yml
+# (e.g. host_vars/spark-02/vars.yml) and edit for the real host.
+#
+# Variables here override group_vars/all/vars.yml for the matching host.
+# Example addresses use RFC 5737 documentation ranges — replace them.
+# Do NOT commit a file with real LAN IPs per the project privacy rule.
+
+# ---------------------------------------------------------------------------
+# Scenario A — single NIC, force a specific v4 instead of fact auto-detect
+# ---------------------------------------------------------------------------
+# The default in vars.yml is:
+#   k3s_node_ip:       "{{ ansible_default_ipv4.address }}"
+#   k3s_flannel_iface: "{{ ansible_default_ipv4.interface }}"
+#
+# That picks the interface carrying the default route. Override it here
+# if the host briefly has a second default route during boot, or if the
+# detected interface is the wrong one (e.g. a bridge added by libvirt).
+#
+# k3s_node_ip: "198.51.100.50"
+# k3s_flannel_iface: "enp1s0"
+
+# ---------------------------------------------------------------------------
+# Scenario B — dual NIC, dedicate NIC-B to cluster / pod traffic
+# ---------------------------------------------------------------------------
+# Management / SSH stays on NIC-A (the default route); CNI overlay and
+# node-to-node pod traffic go over NIC-B. Useful when experimenting with
+# Calico / Cilium / multus on an isolated cluster subnet.
+#
+# k3s_node_ip: "203.0.113.50"      # NIC-B's IPv4 — becomes the node's InternalIP
+# k3s_flannel_iface: "enp2s0"      # NIC-B's name — flannel VXLAN endpoint
+#
+# Notes:
+# - kubelet advertises k3s_node_ip as InternalIP. On a multi-node cluster,
+#   every other node must be able to reach this address. Single-node is fine.
+# - Pod CIDR (10.42.0.0/16) is routed on the node via the CNI bridge, not
+#   NIC-B directly, so NIC-B can be on an isolated subnet.
+
+# ---------------------------------------------------------------------------
+# CNI swap (flannel -> Calico / Cilium) — NOT a host_vars concern
+# ---------------------------------------------------------------------------
+# Disabling the built-in flannel is cluster-wide. Put those changes in
+# group_vars/all/vars.yml instead (add `flannel` to k3s_disable_components
+# and extend k3s_apiserver_args / add a new role to install the replacement
+# CNI). Keep the k3s_node_ip / k3s_flannel_iface pins either way — they
+# make the node's address deterministic regardless of which CNI you run.

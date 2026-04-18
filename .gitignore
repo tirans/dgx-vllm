@@ -21,6 +21,10 @@ CLAUDE.md
 # Ansible vault password — never commit
 ansible/.vault_pass
 
+# Ansible per-host overrides often hold real LAN IPs / NIC names — never commit.
+# Scaffolds with RFC 5737 doc addresses stay tracked via the .example suffix.
+ansible/host_vars/*/vars.yml
+
 # Ansible retry files
 *.retry
 

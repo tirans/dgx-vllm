@@ -17,6 +17,16 @@ k3s_disable_components:
   - helm-controller
 k3s_kubeconfig_mode: "600"
 k3s_max_pods: 64
+# Pin K3s to a single IPv4 address and interface. Without this, on hosts
+# that also have a global IPv6 address (SLAAC), the embedded network-policy
+# controller can hang waiting for the `node.cloudprovider.kubernetes.io/
+# uninitialized` taint to be removed, K3s shuts itself down after its 15m
+# internal deadline, systemd restarts it, and the CNI conflist is never
+# written — kubelet stays in "cni plugin not initialized". Related upstream:
+# k3s-io/k3s#8281. Values are resolved from host facts at apply time so no
+# real IPs land in the tracked tree (privacy rule in CLAUDE.md).
+k3s_node_ip: "{{ ansible_default_ipv4.address }}"
+k3s_flannel_iface: "{{ ansible_default_ipv4.interface }}"
 # Set to true to wipe K3s and reinstall on the next setup.sh run.
 # Required when changing flags that the K3s installer reads at install time
 # (e.g. secrets-encryption, audit log paths). Uses scripts/clean-k3s.sh

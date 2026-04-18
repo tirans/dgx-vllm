@@ -2,6 +2,9 @@
 # Source: ansible/roles/k3s/templates/config.yaml.j2
 # K3s reads this on startup. CLI flags in INSTALL_K3S_EXEC override these.
 write-kubeconfig-mode: "{{ k3s_kubeconfig_mode }}"
+# See k3s_node_ip / k3s_flannel_iface in group_vars/all/vars.yml for rationale.
+node-ip: "{{ k3s_node_ip }}"
+flannel-iface: "{{ k3s_flannel_iface }}"
 disable:
 {% for c in k3s_disable_components %}
   - {{ c }}
