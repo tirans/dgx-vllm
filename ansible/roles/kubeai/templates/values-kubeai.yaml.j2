@@ -42,17 +42,55 @@ modelServers:
 {% endfor %}
     # HF_TOKEN is injected automatically by KubeAI from the
     # 'kubeai-huggingface' secret (hardcoded in the operator)
-    defaultVolumeMounts:
-      - name: dshm
-        mountPath: /dev/shm
-      - name: hf-cache
-        mountPath: /root/.cache/huggingface
-    defaultVolumes:
-      - name: dshm
-        emptyDir:
-          medium: Memory
-          sizeLimit: "{{ shared_memory_size }}"
-      - name: hf-cache
-        hostPath:
-          path: "{{ hf_cache_host_path }}"
-          type: DirectoryOrCreate
+
+# NOTE: KubeAI v0.23.x's modelServers.<engine> config struct only has an
+# `images` map (internal/config/system.go: `type ModelServer struct { Images
+# map[string]string }`). It has NO defaultArgs / defaultVolumes /
+# defaultVolumeMounts fields. Helm passes any extra keys through verbatim
+# (toYaml), but the operator silently drops unknown keys on unmarshal.
+# The model server Pod is built in internal/modelcontroller/engine_vllm.go:
+#   - /dev/shm is a hardcoded emptyDir (medium=Memory, NO sizeLimit), and
+#   - vLLM args come ONLY from m.Spec.Args (the per-model `args:` we render in
+#     values-models.yaml.j2), NOT from any modelServers.VLLM.defaultArgs.
+# A previous defaultVolumeMounts/defaultVolumes block here (mounting an
+# `hf-cache` hostPath at /root/.cache/huggingface) was therefore DEAD config:
+# it never reached the pod, so {{ hf_cache_host_path }} stays empty and weights
+# re-download to ephemeral storage on every pod restart. It was removed to stop
+# implying a persistent cache exists.
+
+# The ONLY persistent-cache mechanism in v0.23.x is cacheProfiles + a per-model
+# `cacheProfile:` (rendered in values-models.yaml.j2). When a model sets a
+# cacheProfile, KubeAI (internal/modelcontroller/cache.go):
+#   1. creates ONE shared PVC `shared-model-cache-<profile>` with a HARDCODED
+#      accessMode of ReadWriteMany, bound by storageClassName and/or
+#      persistentVolumeName, requesting `storageSize` (default 10Gi);
+#   2. runs a one-shot loader Job that downloads the model into the PVC at
+#      /models/<model>-<uid> (status.cache.loaded flips true when done);
+#   3. mounts that PVC ReadOnly into the server pod and rewrites vLLM's
+#      --model to the mounted /models/<model>-<uid> path.
+# So the cache lands on the PVC's backing volume, NOT at /root/.cache/huggingface.
+#
+# TODO(cache): enable a persistent HF cache on {{ hf_cache_host_path }}. This is
+# left disabled on purpose: the cache PVC is forced ReadWriteMany, but the only
+# StorageClass on this single-node K3s is `local-path` (ReadWriteOnce only).
+# Referencing a cacheProfile now would create an unbindable RWX PVC that stays
+# Pending and would BLOCK the loader Job and the model pods -> breaking the
+# currently-working 35B serving. Enabling caching safely requires THREE
+# coordinated changes that must land together:
+#   (a) roles/kubeai/tasks/main.yml (owned by another role/agent): before the
+#       operator helm install, create a hostPath PersistentVolume backed by
+#       {{ hf_cache_host_path }} with accessModes [ReadWriteMany], a matching
+#       claimRef to llm-stack/shared-model-cache-hostpath, and (optionally)
+#       nodeAffinity to the DGX node. local-path's WaitForFirstConsumer +
+#       Delete reclaim are also unsuitable, so a manually-managed Retain PV is
+#       required;
+#   (b) here: uncomment the cacheProfiles block below (storageSize must be >=
+#       the largest model, e.g. the 35B FP8 weights);
+#   (c) values-models.yaml.j2: set `cacheProfile: hostpath-cache` per model
+#       (NOTE: spec.cacheProfile and spec.url are immutable once set, so
+#       existing Models may need to be recreated, not just patched).
+# cacheProfiles:
+#   hostpath-cache:
+#     sharedFilesystem:
+#       persistentVolumeName: shared-model-cache-hostpath   # PV from step (a)
+#       storageSize: "200Gi"

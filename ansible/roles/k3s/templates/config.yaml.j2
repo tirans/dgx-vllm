@@ -5,6 +5,16 @@ write-kubeconfig-mode: "{{ k3s_kubeconfig_mode }}"
 # See k3s_node_ip / k3s_flannel_iface in group_vars/all/vars.yml for rationale.
 node-ip: "{{ k3s_node_ip }}"
 flannel-iface: "{{ k3s_flannel_iface }}"
+# Disable the embedded kube-router network-policy controller to avoid the
+# post-reboot "failed to start networking ... uninitialized taint" restart loop.
+# See k3s_disable_network_policy in group_vars/all/vars.yml for the full rationale.
+disable-network-policy: {{ k3s_disable_network_policy | bool | lower }}
+{% if k3s_default_runtime %}
+# Native k3s flag — sets containerd's default runtime WITHOUT a custom
+# config.toml.tmpl (which would clobber the base [cri].cni section and break pod
+# networking on reboot). See k3s_default_runtime in group_vars/all/vars.yml.
+default-runtime: {{ k3s_default_runtime }}
+{% endif %}
 disable:
 {% for c in k3s_disable_components %}
   - {{ c }}

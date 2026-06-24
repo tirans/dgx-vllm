@@ -1,0 +1,20 @@
+# Managed by Ansible — do not edit manually.
+# Source: ansible/roles/k3s/files/k3s-reboot-recover.service
+#
+# Runs once per boot, after k3s has started, to clean up terminal pods left by
+# an ungraceful reboot and ensure a GPU is allocatable. The script itself waits
+# for the node to become Ready, so ordering only needs to be "after k3s".
+[Unit]
+Description=K3s reboot recovery (reap terminal pods, re-advertise GPU)
+After=k3s.service
+Wants=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/k3s-reboot-recover.sh
+TimeoutStartSec=600
+# Best-effort: a recovery hiccup must never fail the boot.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

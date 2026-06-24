@@ -1,6 +1,13 @@
 # Managed by Ansible — do not edit manually
 # Default-deny ingress with explicit allow rules for the LLM stack.
 # Egress is unrestricted (HF model downloads, image pulls need it).
+#
+# NOTE: These policies are ENFORCED only when a policy-capable CNI is running.
+# This stack disables K3s's embedded kube-router controller for reboot
+# resilience (see k3s_disable_network_policy in group_vars/all/vars.yml), so
+# while that is true the kubeai role SKIPS applying this file and these policies
+# are inert. They are kept here ready for a future policy-capable CNI (e.g.
+# Calico). flannel on its own does NOT enforce NetworkPolicy.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

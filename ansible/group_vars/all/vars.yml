@@ -10,11 +10,46 @@ kubeai_namespace: llm-stack
 # (GHCR ghcr.io/kubeai-project/kubeai has broken multi-arch for arm64)
 kubeai_image_repository: substratusai/kubeai
 kubeai_image_tag: latest
+# Helm chart versions pinned to the known-good deployed set (floating versions
+# risk an upstream chart change breaking a re-run). substratusai/kubeai has no
+# semver image tag (only :latest), so the chart pin is the reproducibility control.
+kubeai_chart_version: "0.23.2"
+kubeai_models_chart_version: "0.23.1"
+nvidia_device_plugin_chart_version: "0.19.0"
+# Max wait for a warm model pod to report Ready. 35B weights can take many
+# minutes to load (more on a cold cache); the vLLM pod's own startup budget is ~3h.
+model_ready_timeout: 1800
 k3s_disable_components:
   - traefik
   # We use the kubernetes.core.helm Ansible module + Helm v3 binary directly,
   # not K3s's embedded HelmChart CRD reconciler. Disabling saves a controller.
   - helm-controller
+# Disable K3s's embedded kube-router network-policy controller.
+# WHY (reboot resilience): "start networking" is one atomic step that writes the
+# flannel CNI config AND starts this controller. After a reboot the controller
+# blocks up to 15 MINUTES waiting for the node.cloudprovider.kubernetes.io/
+# uninitialized taint to be *removed* — but on an already-initialized node that
+# removal transition never fires, so it times out, K3s aborts "start networking"
+# (CNI is never written), exits, and systemd restarts it. The loop repeats every
+# ~15 min: the node stays NotReady, no pod reschedules, the GPU is never
+# advertised. Disabling the controller lets networking finish immediately so the
+# node is Ready within seconds of boot. (--node-ip/--flannel-iface alone do NOT
+# fix this — they only pin flannel's interface.) See k3s-io/k3s#8281.
+# TRADEOFF: Kubernetes NetworkPolicy objects are no longer ENFORCED (kube-router
+# is the only enforcer; flannel does not enforce policy). Acceptable on this
+# single-node LAN appliance. The now-inert policies in roles/kubeai are skipped
+# while this is true. To restore enforcement, deploy a policy-capable CNI such as
+# Calico and set this back to false.
+k3s_disable_network_policy: true
+# Make the NVIDIA container runtime the containerd default via k3s's NATIVE flag.
+# k3s auto-detects nvidia-container-runtime and registers the `nvidia` runtime +
+# RuntimeClass on its own; this only marks it the default. It REPLACES the old
+# custom containerd config.toml.tmpl, which fully replaced k3s's base template and
+# dropped the [cri].cni section — leaving containerd with no CNI conf_dir and
+# breaking pod networking ("cni plugin not initialized") on every containerd
+# restart/reboot. Every GPU pod already sets runtimeClassName: nvidia, so set this
+# to "" to keep the runc default if you ever prefer that.
+k3s_default_runtime: nvidia
 k3s_kubeconfig_mode: "600"
 k3s_max_pods: 64
 # Pin K3s to a single IPv4 address and interface. Without this, on hosts
@@ -27,6 +62,28 @@ k3s_max_pods: 64
 # real IPs land in the tracked tree (privacy rule in CLAUDE.md).
 k3s_node_ip: "{{ ansible_default_ipv4.address }}"
 k3s_flannel_iface: "{{ ansible_default_ipv4.interface }}"
+# Host firewall (ufw) must permit the k3s CIDRs. ufw ships default-deny
+# (DEFAULT_INPUT_POLICY=DROP) and k3s/flannel never add ufw rules, so traffic
+# from a pod to the hostNetwork kube-apiserver (pod 10.42.x -> ClusterIP
+# 10.43.0.1:443 -> node:6443, which lands in the INPUT chain) is silently
+# dropped. Every API-dependent controller (kubeai, metrics-server,
+# local-path-provisioner, NFD) then times out at startup and CrashLoopBackOffs,
+# and CoreDNS never goes Ready — while LiteLLM (no API dependency) stays up, so
+# :4000 answers but the model engine behind it is dead. Allowing the pod +
+# service CIDRs (and FORWARD ACCEPT for pod egress) is k3s's documented remedy;
+# ufw persists the rules and reloads them on boot, so it survives a restart.
+# Set manage_ufw: false to opt out (e.g. if ufw is disabled host-wide).
+manage_ufw: true
+k3s_pod_cidr: "10.42.0.0/16"       # k3s flannel default (cluster-cidr)
+k3s_service_cidr: "10.43.0.0/16"   # k3s default (service-cidr)
+# Retire the Docker daemon. k3s uses its OWN bundled containerd
+# (/run/k3s/containerd/containerd.sock) plus nvidia-container-runtime; nothing
+# in this stack uses dockerd — the only "docker" references in the repo are
+# Docker Hub image pulls, which containerd performs. A running dockerd is a
+# second iptables actor that forces the FORWARD chain policy to DROP and races
+# flannel's pod networking across restarts, so we stop+disable+mask it. Set to
+# false if you reintroduce a Docker-based workload on this host.
+disable_docker: true
 # Set to true to wipe K3s and reinstall on the next setup.sh run.
 # Required when changing flags that the K3s installer reads at install time
 # (e.g. secrets-encryption, audit log paths). Uses scripts/clean-k3s.sh
@@ -105,10 +162,10 @@ models:
       - gemma4
 
   # Qwen 3.5 35B-A3B — primary, runs on 0.17.0-t5 with Transformers 5.x
-  qwen35-35b-a3b:
+  qwen36-35b-a3b:
     enabled: true
     owner: qwen
-    url: "hf://Qwen/Qwen3.5-35B-A3B"
+    url: "hf://Qwen/Qwen3.6-35B-A3B-FP8"
     features:
       - TextGeneration
     min_replicas: 1
@@ -122,7 +179,7 @@ models:
       - "--tool-call-parser=qwen3_coder"
       - "--reasoning-parser=qwen3"
     litellm_aliases:
-      - qwen35
+      - qwen36
       - gpt-4
 
   # Qwen 3 30B-A3B — proven fallback, scale from zero
@@ -142,12 +199,21 @@ models:
 # --- LiteLLM ---
 litellm_image: "ghcr.io/berriai/litellm:main-stable"
 litellm_port: 4000
-litellm_num_workers: 2
+# One async uvicorn worker is plenty for this GPU-bound proxy. num_workers=2
+# doubled the startup import memory and OOMKilled the pod at the old 2Gi cap.
+litellm_num_workers: 1
 litellm_service_type: LoadBalancer
 litellm_router_strategy: "simple-shuffle"
 litellm_timeout: 300
 litellm_num_retries: 2
 litellm_drop_params: true
+# Resource sizing. LiteLLM's import storm spikes memory at startup; a 4Gi cap
+# gives a single worker ~2.5x headroom. Cheap on the 128GB box. Tune here if you
+# raise litellm_num_workers.
+litellm_cpu_request: "500m"
+litellm_cpu_limit: "2"
+litellm_memory_request: "2Gi"
+litellm_memory_limit: "4Gi"
 
 # --- Validation ---
 validate_cold_start_models: false

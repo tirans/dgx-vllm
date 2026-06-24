@@ -15,3 +15,17 @@
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   changed_when: false
   listen: "Restart K3s"
+
+# Node Ready is not sufficient — wait until the cluster actually serves pods.
+# CoreDNS (kube-system deployment "coredns") becoming Available is a reliable
+# signal that the control plane and CNI are functional after a restart.
+- name: Wait for CoreDNS available after restart
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system wait
+      --for=condition=Available deployment/coredns
+      --timeout=120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+  listen: "Restart K3s"

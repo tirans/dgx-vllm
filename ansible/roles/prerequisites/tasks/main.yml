@@ -35,10 +35,14 @@
 - name: Install uv to /usr/local/bin
   when: not uv_stat.stat.exists
   ansible.builtin.shell:
-    cmd: curl -LsSf https://astral.sh/uv/install.sh | sh
+    cmd: curl -LsSf --connect-timeout 10 --max-time 120 https://astral.sh/uv/install.sh | sh
   environment:
     UV_INSTALL_DIR: /usr/local/bin
     INSTALLER_NO_MODIFY_PATH: "1"
+  register: uv_install_script
+  retries: 5
+  delay: 10
+  until: uv_install_script is succeeded
 
 - name: Install Python dependencies via uv
   ansible.builtin.command:
@@ -61,6 +65,11 @@
         url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         dest: /tmp/get_helm.sh
         mode: "0755"
+        timeout: 60
+      register: helm_script_download
+      retries: 5
+      delay: 10
+      until: helm_script_download is succeeded
 
     - name: Run Helm install script
       ansible.builtin.command:
@@ -98,3 +107,54 @@
   when: "'diff' not in helm_plugins.stdout"
   register: helm_diff_install
   changed_when: helm_diff_install.rc == 0
+  retries: 5
+  delay: 10
+  until: helm_diff_install is succeeded
+
+# --- Host networking: make ufw compatible with k3s, retire dockerd -----------
+# See manage_ufw / k3s_pod_cidr / k3s_service_cidr / disable_docker in
+# group_vars/all/vars.yml for the full rationale. These live in prerequisites
+# (which runs before the k3s role) so the host firewall already permits the pod
+# CIDR before k3s (re)starts — otherwise every API-dependent pod
+# CrashLoopBackOffs after a reboot because pod -> kube-apiserver is dropped by
+# ufw's default-deny INPUT policy.
+
+- name: Allow k3s pod CIDR through ufw (pod -> apiserver / host services)
+  community.general.ufw:
+    rule: allow
+    src: "{{ k3s_pod_cidr }}"
+    comment: "k3s pod CIDR (flannel)"
+  when: manage_ufw | bool
+
+- name: Allow k3s service CIDR through ufw (ClusterIP traffic)
+  community.general.ufw:
+    rule: allow
+    src: "{{ k3s_service_cidr }}"
+    comment: "k3s service CIDR"
+  when: manage_ufw | bool
+
+- name: Set ufw default FORWARD policy to ACCEPT (flannel pod forwarding)
+  community.general.ufw:
+    direction: routed
+    policy: allow
+  when: manage_ufw | bool
+
+- name: Check whether the Docker daemon unit exists
+  ansible.builtin.command:
+    cmd: systemctl list-unit-files docker.service
+  register: docker_unit
+  changed_when: false
+  failed_when: false
+
+- name: Stop, disable and mask the Docker daemon (unused; conflicts with flannel iptables)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - docker.service
+    - docker.socket
+  when:
+    - disable_docker | bool
+    - "'docker.service' in docker_unit.stdout"

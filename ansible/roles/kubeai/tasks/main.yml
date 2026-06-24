@@ -12,7 +12,13 @@
   environment:
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
 
+# Only applied when a policy-capable CNI is enforcing NetworkPolicy. The embedded
+# kube-router controller is disabled for reboot resilience (k3s_disable_network_
+# policy), under which these policies would be inert — applying them would imply
+# an isolation guarantee the cluster does not actually provide. See the header of
+# files/network-policies.yaml.
 - name: Apply default-deny ingress NetworkPolicies
+  when: not (k3s_disable_network_policy | default(false) | bool)
   kubernetes.core.k8s:
     state: present
     src: "{{ role_path }}/files/network-policies.yaml"
@@ -50,6 +56,10 @@
     repo_url: https://www.kubeai.org
   environment:
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: kubeai_repo
+  retries: 5
+  delay: 10
+  until: kubeai_repo is succeeded
 
 - name: Install KubeAI operator and model catalog
   block:
@@ -63,6 +73,7 @@
       kubernetes.core.helm:
         name: kubeai
         chart_ref: kubeai/kubeai
+        chart_version: "{{ kubeai_chart_version }}"
         release_namespace: "{{ kubeai_namespace }}"
         create_namespace: true
         values_files:
@@ -70,6 +81,10 @@
         wait: false
       environment:
         KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: kubeai_install
+      retries: 5
+      delay: 10
+      until: kubeai_install is succeeded
 
     - name: Wait for KubeAI operator to be ready
       ansible.builtin.command:
@@ -95,6 +110,7 @@
       kubernetes.core.helm:
         name: kubeai-models
         chart_ref: kubeai/models
+        chart_version: "{{ kubeai_models_chart_version }}"
         release_namespace: "{{ kubeai_namespace }}"
         values_files:
           - /tmp/ansible-models-values.yaml
@@ -102,6 +118,10 @@
         wait_timeout: 120s
       environment:
         KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: models_install
+      retries: 5
+      delay: 10
+      until: models_install is succeeded
 
   always:
     - name: Clean up temp values files
@@ -124,64 +144,27 @@
   ansible.builtin.debug:
     msg: "{{ models_list.stdout }}"
 
-- name: Wait for model pods to start (warm models only)
-  ansible.builtin.shell:
+- name: Wait for warm model pods to be Ready
+  ansible.builtin.command:
     cmd: >-
-      kubectl -n {{ kubeai_namespace }} get pods
-      -l app=model-{{ item.key }}
-      --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null | head -1
+      kubectl -n {{ kubeai_namespace }} wait --for=condition=Ready
+      pod -l app=model-{{ item.key }} --timeout={{ model_ready_timeout }}s
   environment:
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
-  register: model_pod_status
+  register: model_ready
   changed_when: false
-  retries: 30
-  delay: 20
-  until: >-
-    model_pod_status.stdout == 'Running'
-    or model_pod_status.stdout == ''
+  failed_when: false
+  retries: 5
+  delay: 15
+  until: model_ready.rc == 0
   loop: "{{ models | dict2items | selectattr('value.enabled', 'equalto', true) | selectattr('value.min_replicas', 'greaterthan', 0) | list }}"
   loop_control:
     label: "{{ item.key }}"
 
-- name: Check for CrashLoopBackOff pods
-  ansible.builtin.shell:
-    cmd: >-
-      kubectl -n {{ kubeai_namespace }} get pods
-      --no-headers 2>/dev/null |
-      grep -E 'CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull' || true
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
-  register: crashing_pods
-  changed_when: false
-
-- name: Get logs from crashing pods
-  ansible.builtin.shell:
-    cmd: >-
-      kubectl -n {{ kubeai_namespace }} logs {{ item.split()[0] }} --tail=10 2>&1
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
-  register: crash_logs
-  changed_when: false
-  loop: "{{ crashing_pods.stdout_lines }}"
-  loop_control:
-    label: "{{ item.split()[0] }}"
-  when: crashing_pods.stdout_lines | length > 0
-
-- name: Report crashing pods
-  ansible.builtin.fail:
-    msg: |
-      Pods in error state detected in {{ kubeai_namespace }} namespace:
-
-      {{ crashing_pods.stdout }}
-
-      {% if crash_logs.results is defined %}
-      {% for result in crash_logs.results %}
-      {% if result.stdout is defined %}
-      --- {{ result.item.split()[0] }} ---
-      {{ result.stdout }}
-
-      {% endif %}
-      {% endfor %}
-      {% endif %}
-      Fix the issue and re-run: ./setup.sh --tags kubeai,litellm,validate
-  when: crashing_pods.stdout_lines | length > 0
+- name: Diagnose any unhealthy pods in the namespace (fails with real cause)
+  ansible.builtin.include_role:
+    name: diagnostics
+  vars:
+    diag_namespace: "{{ kubeai_namespace }}"
+    diag_context: "Post-deploy health check (KubeAI + models)"
+    diag_fail: true

@@ -1,3 +1,7 @@
 collections:
   - name: kubernetes.core
     version: ">=5.0.0"
+  # community.general.ufw — host firewall rules for the k3s pod/service CIDRs
+  # (see roles/prerequisites). Already vendored on the control node at 8.3.0.
+  - name: community.general
+    version: ">=8.0.0"

@@ -1,0 +1,159 @@
+---
+# roles/diagnostics/tasks/main.yml — Diagnose unhealthy pods
+#
+# Surfaces the *real* cause of a failing pod, which `kubectl logs` alone
+# cannot show: an OOMKill / SIGKILL (exit 137) leaves no log trace — the
+# process is killed by the kernel mid-run and its stdout is truncated. The
+# only durable evidence is `status.containerStatuses[*].lastState.terminated`,
+# which this role captures alongside resource limits, events, and logs.
+#
+# Usage:
+#   - ansible.builtin.include_role:
+#       name: diagnostics
+#     vars:
+#       diag_namespace: "{{ kubeai_namespace }}"   # required
+#       diag_selector: "app=litellm-proxy"          # optional; empty = whole ns
+#       diag_context: "LiteLLM rollout failed"      # optional report header
+#       diag_fail: true                             # optional, default true
+
+- name: "Diagnostics: find unhealthy pods in {{ diag_namespace }}"
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ diag_namespace }} get pods
+      {{ ('-l ' + diag_selector) if (diag_selector | default('') | length > 0) else '' }}
+      --no-headers 2>/dev/null |
+      grep -E
+      'CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull|OOMKilled|CreateContainerError|CreateContainerConfigError|RunContainerError|Init:Error|InvalidImageName'
+      || true
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: diag_bad_pods
+  changed_when: false
+
+- name: "Diagnostics: capture termination state (the key OOMKill/SIGKILL signal)"
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ diag_namespace }} get pod {{ item.split()[0] }}
+      -o jsonpath='{range .status.containerStatuses[*]}{.name}: reason={.lastState.terminated.reason} exitCode={.lastState.terminated.exitCode} restarts={.restartCount}{"\n"}{end}'
+      2>&1
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: diag_termination
+  changed_when: false
+  loop: "{{ diag_bad_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  when: diag_bad_pods.stdout_lines | length > 0
+
+- name: "Diagnostics: capture resource limits"
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ diag_namespace }} get pod {{ item.split()[0] }}
+      -o jsonpath='{range .spec.containers[*]}{.name} limits={.resources.limits}{"\n"}{end}'
+      2>&1
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: diag_limits
+  changed_when: false
+  loop: "{{ diag_bad_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  when: diag_bad_pods.stdout_lines | length > 0
+
+- name: "Diagnostics: capture recent events"
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ diag_namespace }} get events
+      --field-selector involvedObject.name={{ item.split()[0] }}
+      --sort-by=.lastTimestamp 2>/dev/null | tail -15
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: diag_events
+  changed_when: false
+  loop: "{{ diag_bad_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  when: diag_bad_pods.stdout_lines | length > 0
+
+- name: "Diagnostics: capture logs (previous instance first, fall back to current)"
+  ansible.builtin.shell:
+    cmd: >-
+      kubectl -n {{ diag_namespace }} logs {{ item.split()[0] }}
+      --tail=100 --all-containers=true --previous 2>/dev/null ||
+      kubectl -n {{ diag_namespace }} logs {{ item.split()[0] }}
+      --tail=100 --all-containers=true 2>&1
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: diag_logs
+  changed_when: false
+  loop: "{{ diag_bad_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  when: diag_bad_pods.stdout_lines | length > 0
+
+# Build the consolidated, human-readable report once so the debug print and
+# the (optional) failure share identical text. Iterates the per-pod result
+# lists by index — each diag_* task looped over the same diag_bad_pods lines,
+# so result N of every task belongs to the same pod.
+- name: "Diagnostics: assemble report"
+  ansible.builtin.set_fact:
+    diag_report: |-
+      {% if diag_context | default('') | length > 0 %}
+      ===== {{ diag_context }} =====
+      {% endif %}
+      Unhealthy pod diagnostics — namespace: {{ diag_namespace }}{{ ' (' + diag_selector + ')' if (diag_selector | default('') | length > 0) else '' }}
+
+      Pods in an error state:
+      {{ diag_bad_pods.stdout }}
+      {% for pod in diag_bad_pods.stdout_lines %}
+      {% set name = pod.split()[0] %}
+      ───────────────────────────────────────────────────────────────
+      POD: {{ name }}
+      ───────────────────────────────────────────────────────────────
+      [termination state]  ← OOMKill/SIGKILL show here, NOT in logs
+      {{ diag_termination.results[loop.index0].stdout | default('(none)') | trim }}
+
+      [resource limits]
+      {{ diag_limits.results[loop.index0].stdout | default('(none)') | trim }}
+
+      [recent events]
+      {{ diag_events.results[loop.index0].stdout | default('(none)') | trim }}
+
+      [logs — previous instance if available, else current]
+      {{ diag_logs.results[loop.index0].stdout | default('(none)') | trim }}
+
+      {% endfor %}
+  when: diag_bad_pods.stdout_lines | length > 0
+
+# True when any captured termination reason mentions OOMKilled, so we can
+# append a memory-specific remediation hint.
+- name: "Diagnostics: detect OOMKill across captured termination states"
+  ansible.builtin.set_fact:
+    diag_oomkilled: >-
+      {{ diag_termination.results
+         | map(attribute='stdout', default='')
+         | join(' ')
+         | regex_search('OOMKilled') is not none }}
+  when: diag_bad_pods.stdout_lines | length > 0
+
+- name: "Diagnostics: report unhealthy pods"
+  ansible.builtin.debug:
+    msg: "{{ diag_report }}"
+  when: diag_bad_pods.stdout_lines | length > 0
+
+- name: "Diagnostics: fail on unhealthy pods"
+  ansible.builtin.fail:
+    msg: |-
+      {{ diag_report }}
+      {% if diag_oomkilled | default(false) | bool %}
+      ⚠ OOMKilled — a container exceeded its memory limit (see limits above). For litellm-proxy: raise litellm_memory_limit and/or lower litellm_num_workers in group_vars/all/vars.yml. For a vLLM model pod: lower gpu_memory_utilization / --max-model-len, or raise the pod memory limit.
+      {% endif %}
+      Re-run after fixing: ./setup.sh --tags kubeai,litellm,validate
+  when:
+    - diag_bad_pods.stdout_lines | length > 0
+    - diag_fail | default(true) | bool
+
+- name: "Diagnostics: no unhealthy pods"
+  ansible.builtin.debug:
+    msg: "diagnostics: no unhealthy pods in {{ diag_namespace }}{{ ' (' + diag_selector + ')' if diag_selector | default('') else '' }}"
+  when: diag_bad_pods.stdout_lines | length == 0

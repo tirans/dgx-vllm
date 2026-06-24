@@ -99,11 +99,11 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "{{ litellm_cpu_request }}"
+              memory: "{{ litellm_memory_request }}"
             limits:
-              cpu: "2"
-              memory: "2Gi"
+              cpu: "{{ litellm_cpu_limit }}"
+              memory: "{{ litellm_memory_limit }}"
           readinessProbe:
             httpGet:
               path: /health/readiness

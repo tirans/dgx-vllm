@@ -21,6 +21,10 @@
       delegate_to: localhost
       run_once: true
       changed_when: false
+      register: galaxy_install
+      retries: 5
+      delay: 10
+      until: galaxy_install is succeeded
       tags: [always]
 
   roles:

@@ -79,6 +79,37 @@
       then re-run setup.sh.
     success_msg: "System clock is NTP-synchronized."
 
+- name: Verify vault is decrypted
+  ansible.builtin.assert:
+    that:
+      - litellm_master_key is defined
+      - litellm_master_key | length > 0
+    fail_msg: "Vault not decrypted (litellm_master_key empty). Check .vault_pass / --ask-vault-pass."
+    success_msg: "Vault decrypted."
+  no_log: true
+
+- name: Ensure HF cache directory exists
+  ansible.builtin.file:
+    path: "{{ hf_cache_host_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Verify HF cache directory is writable
+  ansible.builtin.command:
+    cmd: "test -w {{ hf_cache_host_path }}"
+  register: hf_cache_writable
+  changed_when: false
+  failed_when: hf_cache_writable.rc != 0
+
+- name: Assert HF cache path is writable
+  ansible.builtin.assert:
+    that:
+      - hf_cache_writable.rc == 0
+    fail_msg: >-
+      HF cache path {{ hf_cache_host_path }} is not writable.
+      Model weights cache here — fix permissions/ownership, then re-run setup.sh.
+    success_msg: "HF cache path {{ hf_cache_host_path }} is writable."
+
 - name: Preflight passed
   ansible.builtin.debug:
     msg: >-

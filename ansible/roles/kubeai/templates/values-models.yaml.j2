@@ -20,5 +20,14 @@ catalog:
     resourceProfile: "{{ model.resource_profile | default('dgx-spark-gpu:1') }}"
     minReplicas: {{ model.min_replicas | default(0) }}
     maxReplicas: {{ model.max_replicas | default(1) }}
+{# TODO(cache): persistent HF cache (KubeAI v0.23.x). To enable, set
+   `cache_profile: hostpath-cache` on a model in group_vars/all/vars.yml and
+   uncomment the line below. This is INERT until the matching cacheProfiles
+   block in values-kubeai.yaml.j2 AND a ReadWriteMany hostPath PersistentVolume
+   (created in roles/kubeai/tasks/main.yml) both exist — see the detailed
+   TODO(cache) in values-kubeai.yaml.j2. WARNING: spec.cacheProfile and
+   spec.url are immutable once set; switching an existing Model onto a
+   cacheProfile requires deleting/recreating it, not an in-place upgrade. #}
+{#  cacheProfile: "{{ model.cache_profile }}"  -- requires model.cache_profile to be defined #}
 {% endif %}
 {% endfor %}

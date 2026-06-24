@@ -7,11 +7,19 @@
     repo_url: https://nvidia.github.io/k8s-device-plugin
   environment:
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: nvdp_repo
+  retries: 5
+  delay: 10
+  until: nvdp_repo is succeeded
 
+# chart_version verified fetchable in repo nvdp/nvidia-device-plugin via
+# `helm search repo nvdp/nvidia-device-plugin --versions` (0.19.0 is listed;
+# deployed release is nvidia-device-plugin-0.19.0).
 - name: Install NVIDIA device plugin
   kubernetes.core.helm:
     name: nvidia-device-plugin
     chart_ref: nvdp/nvidia-device-plugin
+    chart_version: "{{ nvidia_device_plugin_chart_version }}"
     release_namespace: nvidia-device-plugin
     create_namespace: true
     values:
@@ -22,6 +30,10 @@
     wait_timeout: 120s
   environment:
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: nvdp_install
+  retries: 5
+  delay: 10
+  until: nvdp_install is succeeded
 
 - name: Wait for device plugin pods to be ready
   ansible.builtin.command:
@@ -42,9 +54,50 @@
     KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
   register: gpu_allocatable
   changed_when: false
+  failed_when: false
   retries: 12
   delay: 10
   until: gpu_allocatable.stdout | default('0') | int > 0
+
+# Single-GPU box (1x GB10): we only assert allocatable > 0, never a fixed count.
+- name: Collect device-plugin diagnostics (no GPU allocatable)
+  when: not (gpu_allocatable.stdout | default('0') | int > 0)
+  block:
+    - name: Dump device-plugin pods
+      ansible.builtin.command:
+        cmd: kubectl -n nvidia-device-plugin get pods
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: nvdp_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Dump device-plugin pod logs
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n nvidia-device-plugin logs
+          -l app.kubernetes.io/name=nvidia-device-plugin
+          --tail=50
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: nvdp_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with GPU allocatable diagnostics
+      ansible.builtin.fail:
+        msg: |
+          No allocatable nvidia.com/gpu on the node after retries.
+          Check the device-plugin DaemonSet, the nvidia runtimeClass, and
+          containerd NVIDIA runtime wiring below.
+
+          === kubectl -n nvidia-device-plugin get pods ===
+          {{ nvdp_pods.stdout | default('<no output>') }}
+          {{ nvdp_pods.stderr | default('') }}
+
+          === device-plugin logs (--tail=50) ===
+          {{ nvdp_logs.stdout | default('<no output>') }}
+          {{ nvdp_logs.stderr | default('') }}
 
 - name: Display GPU count
   ansible.builtin.debug:

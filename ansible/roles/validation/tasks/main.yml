@@ -86,7 +86,9 @@
   delay: 30
   until:
     - chat_response.status == 200
-    - (chat_response.json.choices[0].message.content | default('', true)) | length > 0
+    - >-
+      ((chat_response.json.choices[0].message.content | default('', true))
+       ~ (chat_response.json.choices[0].message.reasoning_content | default('', true))) | length > 0
   no_log: true
 
 - name: Display chat result

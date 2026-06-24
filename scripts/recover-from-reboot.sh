@@ -5,6 +5,11 @@
 # pods stuck in 'Unknown' or 'UnexpectedAdmissionError' state. This script
 # force-deletes them so deployments/daemonsets recreate them.
 #
+# NOTE: As of the reboot-resilience work this is now AUTOMATED on every boot by
+# k3s-reboot-recover.service (deployed by roles/k3s). This script remains as a
+# manual/remote escape hatch; the on-host logic lives in
+# ansible/roles/k3s/files/k3s-reboot-recover.sh.
+#
 # Usage:
 #   ./scripts/recover-from-reboot.sh           # Run on the Spark
 #   ssh spark "bash -s" < scripts/recover-from-reboot.sh  # Run remotely

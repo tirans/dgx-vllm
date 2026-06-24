@@ -18,6 +18,12 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 kubectl wait --for=condition=Ready node --all --timeout=120s
 
 # Configure NVIDIA container runtime for K3s containerd
+# WARNING (legacy, do not copy): the bare config.toml.tmpl below FULLY REPLACES
+# k3s's base containerd template, dropping the [cri].cni section — containerd then
+# has no CNI conf_dir and the node goes NotReady ("cni plugin not initialized") on
+# the next reboot. The Ansible stack instead uses the native `--default-runtime
+# nvidia` flag and ships NO custom template. See ansible/group_vars/all/vars.yml
+# (k3s_default_runtime) and ansible/roles/k3s/tasks/main.yml.
 echo "=== Configuring NVIDIA container runtime ==="
 
 CONTAINERD_TEMPLATE="/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl"

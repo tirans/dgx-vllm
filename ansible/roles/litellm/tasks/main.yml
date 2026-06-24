@@ -25,17 +25,28 @@
         state: absent
 
 - name: Wait for LiteLLM rollout (handles slow image pulls)
-  ansible.builtin.command:
-    cmd: >-
-      kubectl -n {{ kubeai_namespace }} rollout status
-      deployment/litellm-proxy --timeout=300s
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
-  changed_when: false
-  retries: 4
-  delay: 30
-  register: litellm_rollout
-  until: litellm_rollout.rc == 0
+  block:
+    - name: Wait for LiteLLM rollout (handles slow image pulls)
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n {{ kubeai_namespace }} rollout status
+          deployment/litellm-proxy --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      retries: 4
+      delay: 30
+      register: litellm_rollout
+      until: litellm_rollout.rc == 0
+  rescue:
+    - name: Diagnose failed LiteLLM rollout
+      ansible.builtin.include_role:
+        name: diagnostics
+      vars:
+        diag_namespace: "{{ kubeai_namespace }}"
+        diag_selector: "app=litellm-proxy"
+        diag_context: "LiteLLM rollout did not converge"
+        diag_fail: true
 
 - name: Determine proxy URL
   block:

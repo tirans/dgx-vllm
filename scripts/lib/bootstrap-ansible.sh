@@ -8,9 +8,10 @@
 #   bootstrap_ansible
 
 bootstrap_ansible() {
-  local info ok
-  info() { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
-  ok()   { echo -e "\033[1;32m[OK]\033[0m    $*"; }
+  local info ok error
+  info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
+  ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
+  error() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; }
 
   # Ensure uv is available
   if ! command -v uv &>/dev/null; then
@@ -37,6 +38,16 @@ bootstrap_ansible() {
   # Ensure collections (idempotent — galaxy will skip if already present)
   if [[ -f requirements.yml ]]; then
     info "Installing Ansible Galaxy collections..."
-    ansible-galaxy collection install -r requirements.yml --force-with-deps 2>/dev/null || true
+    if ! ansible-galaxy collection install -r requirements.yml --force-with-deps; then
+      error "ansible-galaxy collection install failed."
+      return 1
+    fi
+    # Verify the required collection is actually present, otherwise later
+    # playbook tasks fail with cryptic module-not-found errors.
+    if ! ansible-galaxy collection list 2>/dev/null | grep -q '^kubernetes\.core'; then
+      error "Required collection 'kubernetes.core' is not installed after galaxy install."
+      return 1
+    fi
+    ok "Ansible Galaxy collections installed."
   fi
 }

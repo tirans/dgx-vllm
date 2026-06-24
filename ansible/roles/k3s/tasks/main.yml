@@ -61,6 +61,37 @@
   changed_when: false
   failed_when: false
 
+# Drop-in deployed BEFORE the installer so it is in effect on first boot,
+# guarding the DHCP-vs-k3s startup race (default route not yet present).
+- name: Ensure K3s systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s.service.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy K3s wait-for-default-route systemd drop-in
+  ansible.builtin.copy:
+    src: k3s-wait-for-default-route.conf
+    dest: /etc/systemd/system/k3s.service.d/wait-for-default-route.conf
+    mode: "0644"
+  register: k3s_dropin
+
+- name: Reload systemd after K3s drop-in change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: k3s_dropin.changed
+
+# Only restart an already-running k3s to pick up a changed drop-in. On a first
+# install (k3s_status.rc != 0) the installer starts k3s fresh and reads the
+# drop-in then, so forcing a mid-install restart is avoided. This carrier task
+# runs (and notifies) only when the drop-in changed AND k3s is already active.
+- name: Trigger K3s restart for changed drop-in (only if already running)
+  ansible.builtin.command:
+    cmd: "true"
+  when: k3s_dropin.changed and k3s_status.rc == 0
+  changed_when: true
+  notify: Restart K3s
+
 - name: Install K3s
   when: k3s_status.rc != 0
   block:
@@ -69,6 +100,11 @@
         url: https://get.k3s.io
         dest: /tmp/install-k3s.sh
         mode: "0755"
+        timeout: 60
+      register: k3s_install_script
+      retries: 5
+      delay: 10
+      until: k3s_install_script is succeeded
 
     - name: Run K3s installer (config from /etc/rancher/k3s/config.yaml)
       ansible.builtin.command:
@@ -85,10 +121,47 @@
 
     - name: Wait for K3s node to be ready
       ansible.builtin.command:
-        cmd: kubectl wait --for=condition=Ready node --all --timeout=120s
+        cmd: kubectl wait --for=condition=Ready node --all --timeout=300s
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_node_ready
       changed_when: false
+      failed_when: false
+
+    - name: Collect node diagnostics (node not ready)
+      when: k3s_node_ready.rc != 0
+      block:
+        - name: Dump node status (-o wide)
+          ansible.builtin.command:
+            cmd: kubectl get nodes -o wide
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_nodes_wide
+          changed_when: false
+          failed_when: false
+
+        - name: Describe nodes
+          ansible.builtin.command:
+            cmd: kubectl describe node
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_nodes_describe
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with node readiness diagnostics
+          ansible.builtin.fail:
+            msg: |
+              K3s node did not reach Ready within 300s.
+              Check node taints, conditions, and CNI (flannel) health below.
+
+              === kubectl get nodes -o wide ===
+              {{ k3s_nodes_wide.stdout | default('<no output>') }}
+              {{ k3s_nodes_wide.stderr | default('') }}
+
+              === kubectl describe node ===
+              {{ k3s_nodes_describe.stdout | default('<no output>') }}
+              {{ k3s_nodes_describe.stderr | default('') }}
 
 - name: Create kubectl symlink
   ansible.builtin.file:
@@ -142,19 +215,65 @@
     groups: systemd-journal
     append: true
 
-- name: Ensure containerd config directory exists
+# The NVIDIA runtime is configured natively via `default-runtime: {{ k3s_default_runtime }}`
+# in config.yaml (k3s auto-detects nvidia-container-runtime and registers the
+# `nvidia` runtime + RuntimeClass). We must NOT ship a custom containerd
+# config.toml.tmpl: a full-replacement template drops k3s's base
+# [plugins."io.containerd.grpc.v1.cri".cni] section, leaving containerd with no
+# CNI conf_dir — pod networking then fails with "cni plugin not initialized" on
+# the next containerd restart/reboot (the node never reaches Ready). Remove any
+# such legacy template so k3s renders its complete base config (CNI included).
+- name: Remove legacy custom containerd template (full replacement broke CNI on reboot)
   ansible.builtin.file:
-    path: /var/lib/rancher/k3s/agent/etc/containerd
-    state: directory
-    mode: "0755"
-
-- name: Configure NVIDIA containerd runtime
-  ansible.builtin.template:
-    src: containerd-config.toml.tmpl.j2
-    dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
-    mode: "0644"
+    path: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    state: absent
   notify: Restart K3s
 
 - name: Set KUBECONFIG fact for subsequent roles
   ansible.builtin.set_fact:
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+
+# --- Reboot resilience: auto-heal terminal pods on every boot ----------------
+# Network-policy is disabled (see k3s_disable_network_policy) so the node reaches
+# Ready quickly after a reboot, but an ungraceful shutdown still leaves pods in
+# terminal/limbo phases. This oneshot unit runs the recovery script after k3s
+# starts, on every boot — the automated form of scripts/recover-from-reboot.sh.
+- name: Deploy K3s reboot-recovery script
+  ansible.builtin.copy:
+    src: k3s-reboot-recover.sh
+    dest: /usr/local/bin/k3s-reboot-recover.sh
+    mode: "0755"
+
+- name: Deploy K3s reboot-recovery systemd unit
+  ansible.builtin.copy:
+    src: k3s-reboot-recover.service
+    dest: /etc/systemd/system/k3s-reboot-recover.service
+    mode: "0644"
+
+- name: Reload systemd and enable K3s reboot-recovery unit
+  ansible.builtin.systemd:
+    name: k3s-reboot-recover.service
+    enabled: true
+    daemon_reload: true
+
+# Apply any pending K3s restart NOW (config.yaml / containerd / drop-in changes)
+# instead of at end-of-play, so the NVIDIA/KubeAI/LiteLLM roles that follow run
+# against a healthy, Ready cluster. On recovery this is what makes the
+# netpol-disabled config take effect — breaking the reboot restart loop — before
+# anything downstream tries (and fails) to use the cluster.
+- name: Flush handlers to apply pending K3s restart before downstream roles
+  ansible.builtin.meta: flush_handlers
+
+# One-time recovery of pod debris from a prior boot (the systemd unit handles
+# future boots automatically). Only meaningful when k3s was already running
+# before this run; a first install has nothing to recover. GPU re-advertise is
+# left to the nvidia_plugin role that runs next, so it is skipped here.
+- name: Recover reboot pod debris now (terminal pods from a prior boot)
+  ansible.builtin.command:
+    cmd: /usr/local/bin/k3s-reboot-recover.sh
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    K3S_REAP_GPU: "false"
+  changed_when: false
+  failed_when: false
+  when: k3s_status.rc == 0
